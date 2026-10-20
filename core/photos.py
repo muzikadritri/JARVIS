@@ -22,10 +22,10 @@ and the credits can be shown to the user, who decides how to use the images.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import io
 import json
-import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -38,7 +38,7 @@ OPENVERSE = "https://api.openverse.org/v1/images/"
 COMMONS = "https://commons.wikimedia.org/w/api.php"
 MAX_DOWNLOAD = 12 * 1024 * 1024
 MAX_PX = 1600
-TIMEOUT = 12.0
+TIMEOUT = 8.0
 _ASPECT = {"landscape": "wide", "square": "square", "portrait": "tall"}
 
 
@@ -204,21 +204,31 @@ def fetch_assets(wanted: list[dict], log: Callable[[str], None] = print,
     after which the remaining slots keep their placeholders."""
     assets: dict[str, str] = {}
     photos: list[Photo] = []
-    started = time.monotonic()
+    items, seen = [], set()
     for item in wanted[:8]:
-        if time.monotonic() - started > budget_seconds:
-            log("photo search took too long — remaining images stay placeholders")
-            break
         key = str(item.get("key") or "").strip()
-        if not key or key in assets:
-            continue
-        photo = find_photo(str(item.get("query") or ""), str(item.get("orientation") or "landscape"), log)
-        if photo:
-            try:
-                assets[key] = photo.b64()
-                photos.append(photo)
-            except OSError as e:
-                log(f"cached photo for '{key}' unreadable: {e}")
+        if key and key not in seen:
+            seen.add(key)
+            items.append((key, str(item.get("query") or ""), str(item.get("orientation") or "landscape")))
+    if not items:
+        return assets, photos
+    # All searches at once: one slow host no longer holds up the others, and
+    # the whole batch costs at most the budget.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(items)))
+    futures = {pool.submit(find_photo, q, o, log): k for k, q, o in items}
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=budget_seconds):
+            photo = future.result()
+            if photo:
+                try:
+                    assets[futures[future]] = photo.b64()
+                    photos.append(photo)
+                except OSError as e:
+                    log(f"cached photo for '{futures[future]}' unreadable: {e}")
+    except concurrent.futures.TimeoutError:
+        log("photo search took too long — remaining images stay placeholders")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return assets, photos
 
 
