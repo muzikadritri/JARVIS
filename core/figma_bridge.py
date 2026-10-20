@@ -34,10 +34,19 @@ THE WIRE
     Bodies are sent as text/plain by the plugin so the browser does not
     preflight them; OPTIONS is still answered, including the Private Network
     Access header Chromium asks for before it lets a page reach loopback.
+
+WHY "localhost" AND TWO SOCKETS
+    Figma's manifest takes host names only in `devAllowedDomains` — an entry
+    like http://127.0.0.1:3846 is rejected as "not a valid URL" when the plugin
+    is imported — so the plugin can only ever ask for http://localhost:3846.
+    `localhost` resolves to ::1 before 127.0.0.1 on Windows and on many Linux
+    setups, so the bridge listens on both loopback addresses rather than
+    relying on the browser to fall back from one to the other.
 """
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 import uuid
@@ -58,6 +67,10 @@ _MAX_WAIT = 25.0
 
 class BridgeError(Exception):
     pass
+
+
+class _ServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
 
 
 class _Job:
@@ -84,6 +97,7 @@ class FigmaBridge:
         self._last_seen = 0.0
         self._context: dict = {}
         self._server: Optional[ThreadingHTTPServer] = None
+        self._server_v6: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._start_error = ""
 
@@ -109,14 +123,27 @@ class FigmaBridge:
                                         name="figma-bridge", daemon=True)
         self._thread.start()
         self._start_error = ""
-        print(f"[FigmaBridge] listening on http://127.0.0.1:{self.port}")
+        # IPv6 loopback is a second door to the same bridge, not a requirement:
+        # a machine with IPv6 switched off simply keeps the IPv4 one.
+        try:
+            v6 = _ServerV6(("::1", self.port), Handler)
+            v6.daemon_threads = True
+            self._server_v6 = v6
+            threading.Thread(target=v6.serve_forever, name="figma-bridge-v6",
+                             daemon=True).start()
+        except OSError as e:
+            print(f"[FigmaBridge] IPv6 loopback unavailable ({e.strerror or e}) — "
+                  f"IPv4 only")
+        print(f"[FigmaBridge] listening on http://localhost:{self.port}")
         return True
 
     def stop(self) -> None:
-        server, self._server = self._server, None
-        if server is not None:
-            server.shutdown()
-            server.server_close()
+        for attr in ("_server", "_server_v6"):
+            server = getattr(self, attr)
+            setattr(self, attr, None)
+            if server is not None:
+                server.shutdown()
+                server.server_close()
         with self._cond:
             for job in list(self._jobs.values()):
                 if not job.done.is_set():
@@ -239,7 +266,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _allowed(self) -> bool:
         host = (self.headers.get("Host") or "").lower()
         port = self.owner.port
-        if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        if host not in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"):
             self._send(421, {"ok": False, "error": "wrong host"})
             return False
         origin = self.headers.get("Origin")
