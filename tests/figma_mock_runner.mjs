@@ -120,6 +120,7 @@ class MockNode {
     return out;
   }
   findAllWithCriteria({ types }) { return this.findAll((n) => types.includes(n.type)); }
+  findOne(fn) { return this.findAll(fn)[0] || null; }
   resize(w, h) {
     for (const [prop, v] of [["width", w], ["height", h]]) {
       if (typeof v !== "number") {
