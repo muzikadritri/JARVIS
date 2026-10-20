@@ -883,7 +883,7 @@ def _action_status(parameters: dict, player) -> str:
     return outcome.done(
         "figma_design",
         plugin_connected=bridge.connected(),
-        bridge=f"127.0.0.1:{bridge.port}" if bridge.running else f"down ({bridge.start_error})",
+        bridge=f"localhost:{bridge.port}" if bridge.running else f"down ({bridge.start_error})",
         file=ctx.get("fileName"), page=ctx.get("page"),
         selection=len(ctx.get("selection") or []),
         figma_mcp=info if reachable else f"off ({info[:120]})",

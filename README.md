@@ -878,7 +878,7 @@ JARVIS/
 ├── figma_plugin/             # The JARVIS Live Designer plugin — import manifest.json in Figma desktop
 │   ├── manifest.json         # Loopback-only network access, dynamic page loading
 │   ├── code.js               # Runs JARVIS's Plugin API code in the open file, reports the result
-│   ├── ui.html               # Long-polls JARVIS on 127.0.0.1:3846 — no inbound connections
+│   ├── ui.html               # Long-polls JARVIS on localhost:3846 — no inbound connections
 │   └── kit.js                # The design kit `J`, prepended to every job
 ├── tests/
 │   ├── test_schleimy_skills.py # `python tests/test_schleimy_skills.py` — no network, no key, no Figma

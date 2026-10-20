@@ -40,7 +40,9 @@
   // loop is strictly sequential: one job is fetched, run to completion in the
   // main thread and reported before the next is asked for, so two pieces of
   // generated code can never interleave on the same canvas.
-  const BASES = ["http://127.0.0.1:3846", "http://localhost:3846"];
+  // Only a host name: Figma's manifest refuses IP addresses in
+  // devAllowedDomains, and the iframe may only reach what the manifest lists.
+  const BASES = ["http://localhost:3846"];
   const POLL_WAIT = 20;
   const pending = new Map();
   let base = null;

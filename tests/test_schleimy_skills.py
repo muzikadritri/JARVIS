@@ -328,7 +328,7 @@ class PluginSimulator:
     in tests/figma_mock_runner.mjs, posts results and context back."""
 
     def __init__(self, port: int):
-        self.base = f"http://127.0.0.1:{port}"
+        self.base = f"http://localhost:{port}"
         self.proc = subprocess.Popen(["node", str(ROOT / "tests" / "figma_mock_runner.mjs")],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True)
@@ -386,6 +386,36 @@ class PluginSimulator:
         self.proc.terminate()
 
 
+def test_manifest():
+    section("figma_plugin/manifest.json — what Figma accepts on import")
+    import ipaddress
+    import re
+    from urllib.parse import urlsplit
+    manifest = json.loads((ROOT / "figma_plugin" / "manifest.json").read_text(encoding="utf-8"))
+    net = manifest.get("networkAccess") or {}
+    dev = net.get("devAllowedDomains") or []
+    check("devAllowedDomains is not empty", bool(dev), net)
+    for entry in dev + [d for d in net.get("allowedDomains") or [] if d != "none"]:
+        host = urlsplit(entry if "://" in entry else "http://" + entry).hostname or ""
+        try:
+            ipaddress.ip_address(host)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+        # Figma rejects IP literals ("must be a valid URL") — the bug that
+        # stopped the plugin importing at all.
+        check(f"{entry} uses a host name, not an IP address", not is_ip and bool(host), host)
+    html = (ROOT / "figma_plugin" / "ui.html").read_text(encoding="utf-8")
+    bases = re.findall(r'"(https?://[^"]+)"', re.search(r"const BASES = \[(.*?)\]", html).group(1))
+    allowed = {e.rstrip("/") for e in dev}
+    check("every address ui.html fetches is listed in devAllowedDomains",
+          bases and all(b.rstrip("/") in allowed for b in bases), (bases, sorted(allowed)))
+    for key in ("name", "id", "api", "main", "ui", "editorType"):
+        check(f"manifest has '{key}'", key in manifest)
+    for key in ("main", "ui"):
+        check(f"manifest '{key}' file exists", (ROOT / "figma_plugin" / manifest.get(key, "?")).is_file())
+
+
 def test_bridge():
     section("core/figma_bridge — guards and round trip")
     from core.figma_bridge import BridgeError, FigmaBridge
@@ -407,6 +437,17 @@ def test_bridge():
         check("the plugin's null origin is accepted", status("null") == 200)
         check("a web page's origin is refused", status("https://evil.example") == 403)
         check("a rebinding Host header is refused", status(host=f"evil.example:{port}") == 421)
+        if bridge._server_v6 is not None:
+            try:
+                with urllib.request.urlopen(f"http://[::1]:{port}/status", timeout=5) as r:
+                    v6_ok = r.status == 200
+            except Exception as e:
+                v6_ok = False
+            check("the bridge also answers on IPv6 loopback (localhost may resolve to ::1)", v6_ok)
+        else:
+            skip("IPv6 loopback", "this machine has no IPv6 loopback")
+        with urllib.request.urlopen(f"http://localhost:{port}/status", timeout=5) as r:
+            check("the bridge answers at http://localhost — the only address Figma allows", r.status == 200)
         try:
             bridge._last_seen = 0
             bridge.run("return 1", timeout=1)
@@ -812,7 +853,7 @@ def test_discovery():
 
 
 def main() -> int:
-    tests = (test_mcp_client, test_bridge, test_figma_designer, test_web_builder,
+    tests = (test_mcp_client, test_manifest, test_bridge, test_figma_designer, test_web_builder,
              test_js_studio, test_tools, test_discovery)
     for fn in tests:
         try:
