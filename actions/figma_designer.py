@@ -423,7 +423,10 @@ def _run(runner: _Runner, code: str, description: str, theme: Optional[dict] = N
     # travel only over the plugin bridge.
     if assets and not isinstance(runner, _BridgeRunner):
         assets = None
-    return runner.run(_job(code, theme, assets, _icons_for(code)), description, timeout)
+    # The plugin bridge has no size limit, so it gets the whole icon set: an icon
+    # named through a variable or plan data then still renders as a real SVG.
+    icons = _icons() if isinstance(runner, _BridgeRunner) else _icons_for(code)
+    return runner.run(_job(code, theme, assets, icons), description, timeout)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -551,6 +554,7 @@ def _clean_copy(raw: Any) -> dict:
     if isinstance(raw.get("ctas"), list):
         out["ctas"] = [_clean_text(c, 40) for c in raw["ctas"][:3] if c]
     if isinstance(raw.get("items"), list):
+        known_icons = set(_icons())
         items = []
         for item in raw["items"][:8]:
             if isinstance(item, dict):
@@ -558,6 +562,8 @@ def _clean_copy(raw: Any) -> dict:
                               if k in ("title", "body", "icon", "value", "label", "name", "role",
                                        "quote", "price", "period", "features", "highlight")
                               and isinstance(v, (str, int, float))})
+                if items[-1].get("icon") and items[-1]["icon"].lower() not in known_icons:
+                    items[-1]["icon"] = "check"
             elif isinstance(item, str):
                 items.append({"title": _clean_text(item, 200)})
         out["items"] = items
