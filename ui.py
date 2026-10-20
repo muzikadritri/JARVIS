@@ -82,8 +82,9 @@ def _read_full_config() -> dict:
 
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
-APP_VERSION  = "MARK LVI"
-APP_PROTOCOL = APP_VERSION.split()[-1]
+APP_VERSION  = "SCHLEIMY EDITION"
+APP_PROTOCOL = "SCHLEIMY"
+APP_CREDIT   = "By Schleimy & Lukas Chiller"
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
@@ -2334,8 +2335,8 @@ class AudioDeviceOverlay(_HudOverlay):
 
         Both calls block for seconds — recording waits for the user to speak,
         the tone waits for itself — and doing that on the Qt thread freezes the
-        HUD, which is the mistake Mark LV already paid for once with a 2.1
-        second wake-word import in the settings drawer.
+        HUD, which is the mistake an earlier release already paid for once with a
+        2.1 second wake-word import in the settings drawer.
 
         Results come back by signal, not by timer. See the note on
         `_level_seen` above for why that distinction is the whole feature.
@@ -6202,7 +6203,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
         lay.addStretch()
-        lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
+        lay.addWidget(_fl(APP_CREDIT, C.PRI_DIM))
         return w
 
     def _on_file_selected(self, path: str):

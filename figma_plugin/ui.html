@@ -1,0 +1,147 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: var(--figma-color-bg, #ffffff);
+    --text: var(--figma-color-text, #1e1e1e);
+    --muted: var(--figma-color-text-secondary, #6b6b6b);
+    --border: var(--figma-color-border, #e5e5e5);
+    --ok: #14ae5c;
+    --warn: #f2994a;
+    --bad: #f24822;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px; background: var(--bg); color: var(--text);
+    font: 12px/1.45 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: .04em; }
+  .sub { color: var(--muted); margin-bottom: 12px; }
+  .status { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+            border: 1px solid var(--border); border-radius: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  #log { margin-top: 10px; max-height: 128px; overflow: auto; color: var(--muted);
+         font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+  <h1>JARVIS LIVE DESIGNER</h1>
+  <div class="sub">Keep this window open — JARVIS designs in this file.</div>
+  <div class="status"><span id="dot" class="dot"></span><span id="state">Looking for JARVIS…</span></div>
+  <div id="log"></div>
+<script>
+  // Networking lives here because the plugin's main thread has none. The
+  // loop is strictly sequential: one job is fetched, run to completion in the
+  // main thread and reported before the next is asked for, so two pieces of
+  // generated code can never interleave on the same canvas.
+  const BASES = ["http://127.0.0.1:3846", "http://localhost:3846"];
+  const POLL_WAIT = 20;
+  const pending = new Map();
+  let base = null;
+
+  const $dot = document.getElementById("dot");
+  const $state = document.getElementById("state");
+  const $log = document.getElementById("log");
+
+  function setState(kind, text) {
+    $dot.className = "dot" + (kind === "ok" ? " ok" : kind === "bad" ? " bad" : "");
+    $state.textContent = text;
+  }
+
+  function log(text, isError) {
+    const line = document.createElement("div");
+    line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+    if (isError) line.className = "err";
+    $log.prepend(line);
+    while ($log.childNodes.length > 40) $log.removeChild($log.lastChild);
+  }
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // text/plain keeps these "simple" requests: no CORS preflight round trip.
+  function post(path, payload) {
+    return fetch(base + path, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async function findBase() {
+    for (const candidate of BASES) {
+      try {
+        const res = await fetch(candidate + "/status", { cache: "no-store" });
+        if (res.ok) {
+          const info = await res.json();
+          if (info && info.name === "jarvis-figma-bridge") return candidate;
+        }
+      } catch (err) {
+        // not this address — try the next one
+      }
+    }
+    return null;
+  }
+
+  function runInMain(job) {
+    return new Promise((resolve) => {
+      pending.set(job.id, resolve);
+      parent.postMessage({ pluginMessage: { type: "run", job } }, "*");
+    });
+  }
+
+  window.onmessage = async (event) => {
+    const msg = event.data && event.data.pluginMessage;
+    if (!msg) return;
+    if (msg.type === "result" && msg.result) {
+      const resolve = pending.get(msg.result.id);
+      if (resolve) {
+        pending.delete(msg.result.id);
+        resolve(msg.result);
+      }
+    } else if (msg.type === "context" && base) {
+      try { await post("/context", msg.context); } catch (err) { /* next poll retries */ }
+    }
+  };
+
+  async function loop() {
+    for (;;) {
+      if (!base) {
+        base = await findBase();
+        if (!base) {
+          setState("bad", "JARVIS is not running on this computer");
+          await sleep(2500);
+          continue;
+        }
+        setState("ok", "Connected to JARVIS");
+        log("connected via " + base);
+        parent.postMessage({ pluginMessage: { type: "context-request" } }, "*");
+      }
+      try {
+        const res = await fetch(`${base}/next?wait=${POLL_WAIT}`, { cache: "no-store" });
+        if (res.status === 204) continue;
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const job = await res.json();
+        setState("ok", job.description ? "Working: " + job.description : "Working…");
+        const result = await runInMain(job);
+        await post("/result", result);
+        log((result.ok ? "✓ " : "✗ ") + (job.description || "job") + (result.ok ? "" : " — " + result.error), !result.ok);
+        setState("ok", "Connected to JARVIS");
+      } catch (err) {
+        log("lost connection: " + err.message, true);
+        setState("bad", "Connection lost — retrying");
+        base = null;
+        await sleep(1500);
+      }
+    }
+  }
+
+  loop();
+</script>
+</body>
+</html>

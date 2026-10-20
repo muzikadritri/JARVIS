@@ -335,7 +335,8 @@ def _load_system_prompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
+            "You are JARVIS, a desktop AI assistant built by Schleimy and Lukas "
+            "Chiller; asked who made you, usually just say Lukas — Lukas Chiller. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )

@@ -1,0 +1,19 @@
+# Secrets and personal data — never commit these
+config/api_keys.json
+config/mcp_servers.json
+config/certs/
+memory/long_term.json
+
+# Downloaded on demand
+providers/voices/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors, OS, temp files
+*.tmp
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -26,7 +26,7 @@ from core import appidentity, outcome
 #     was never offered a browser tool it could not serve. Deferring the import
 #     without keeping that would declare `browser_control` on a machine that
 #     cannot run it — the model would call it, get an exception, and describe a
-#     page it never opened. Exactly the failure mode this project spent Mark LVI
+#     page it never opened. Exactly the failure mode this project spent a whole release
 #     removing from local engines.
 #
 #     So the check stays at module scope and still stops the module loading; it
