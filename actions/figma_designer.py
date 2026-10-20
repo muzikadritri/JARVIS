@@ -129,8 +129,10 @@ JARVIS kit is loaded as `J`. Plain JavaScript, no TypeScript.
   A raw SOLID paint colour is {r,g,b} in 0..1 only; alpha goes to opacity.
 - fills/strokes/effects are immutable arrays: assign a new array.
 - width/height are read-only: node.resize(w, h).
-- Text with role body/lead wraps by itself; any other long text needs width,
-  fillWidth or maxWidth. Never give text a fixed height.
+- Text with role body/lead wraps by itself; give headings (display … h4,
+  quote) fillWidth inside columns and cards. Never give text a fixed height.
+- On inverseBg and primary sections the kit picks readable text and button
+  colours itself; do not force "text" or "muted" there.
 - There is no "stretch" alignment: align:"start" plus fillWidth on children.
 - Absolute positioning is for decoration only (J.glow, a floating badge, an
   oversized numeral): {absolute: true, x, y}. Content stays in auto layout.
@@ -191,7 +193,8 @@ ART DIRECTION — judged against Awwwards Site-of-the-Day work, not templates:
   Gradients only as light (J.glow), never rainbow-filled boxes.
 - Depth: shadow levels on cards, glass over photos and glows, smooth corners.
 - Photos: large crops via J.image({asset}); overlay:true before light text.
-- Buttons: one primary per view, with icon: true; secondary as ghost.
+- Buttons: one primary per view, with icon: true; secondary as ghost (the
+  kit adapts both on dark and primary bands).
 - Copy: use the plan's copy verbatim — specific, never lorem ipsum, "Feature
   1", "Title" or "Image".
 - Contrast: text/muted on bg/surface, onPrimary on primary, inverseText on
@@ -267,10 +270,30 @@ def _image_part(data: bytes):
 
 def _strip_code(text: str) -> str:
     text = (text or "").strip()
-    fence = re.search(r"```(?:javascript|js)?\s*\n(.*?)```", text, re.S)
+    fence = re.search(r"```[\w-]*\s*\n(.*?)```", text, re.S)
     if fence:
         text = fence.group(1)
     return text.strip()
+
+
+MCP_CODE_LIMIT = 50_000
+_compact_cache: dict = {}
+
+
+def _compact_kit() -> str:
+    """The kit without comment lines and indentation, for Figma's own
+    use_figma tool, which takes at most 50,000 characters of code per call.
+    Only whole comment lines are dropped, so no statement changes meaning."""
+    source = _kit()
+    if _compact_cache.get("src") != source:
+        lines = []
+        for line in source.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            lines.append(stripped)
+        _compact_cache.update(src=source, out="\n".join(lines))
+    return _compact_cache["out"]
 
 
 def _kit() -> str:
@@ -301,19 +324,22 @@ def _icons_for(code: str) -> dict:
     """Only the icons this job's code names — the whole set would push a job
     past the 50,000 characters Figma's own use_figma accepts."""
     wanted = {a or b for a, b in _ICON_CALL_RE.findall(code or "")}
-    if re.search(r"icon\s*:\s*true", code or ""):
-        wanted.add("arrow-right")
+    # Names also arrive as data — "icon": "leaf" in a pasted list, arrays,
+    # ternaries — so every quoted word that is an icon name counts.
+    wanted |= {w.lower() for w in re.findall(r"[\"'`]([A-Za-z0-9-]{1,32})[\"'`]", code or "")}
+    wanted.add("arrow-right")
     icons = _icons()
     return {name: icons[name] for name in sorted(wanted) if name in icons}
 
 
 def _job(code: str, theme: Optional[dict] = None, assets: Optional[dict] = None,
-         icons: Optional[dict] = None) -> str:
+         icons: Optional[dict] = None, compact: bool = False) -> str:
     """Kit + theme + icons + assets + the model's code, as one async-function body."""
     theme_js = f"J.setTheme({json.dumps(theme, ensure_ascii=False)});\n" if theme else ""
     icons_js = f"J.setIcons({json.dumps(icons)});\n" if icons else ""
     assets_js = f"J.setAssets({json.dumps(assets)});\n" if assets else ""
-    return f"{_kit()}\n{theme_js}{icons_js}{assets_js}\n{code}\n"
+    kit = _compact_kit() if compact else _kit()
+    return f"{kit}\n{theme_js}{icons_js}{assets_js}\n{code}\n"
 
 
 def _file_key(parameters: dict, state: dict, bridge_ctx: dict) -> str:
@@ -425,8 +451,18 @@ def _run(runner: _Runner, code: str, description: str, theme: Optional[dict] = N
         assets = None
     # The plugin bridge has no size limit, so it gets the whole icon set: an icon
     # named through a variable or plan data then still renders as a real SVG.
-    icons = _icons() if isinstance(runner, _BridgeRunner) else _icons_for(code)
-    return runner.run(_job(code, theme, assets, icons), description, timeout)
+    if isinstance(runner, _BridgeRunner):
+        return runner.run(_job(code, theme, assets, _icons()), description, timeout)
+    job = _job(code, theme, None, _icons_for(code), compact=True)
+    if len(job) > MCP_CODE_LIMIT:
+        # Refused here rather than by the server, with a number the model can
+        # act on — the kit is fixed, only its own code can get shorter.
+        budget = MCP_CODE_LIMIT - (len(job) - len(code))
+        return {"ok": False, "ran": False, "logs": [],
+                "error": f"code too long for Figma's MCP tool: {len(code)} characters, the budget "
+                         f"is {budget}. Shorten it — loop over data arrays instead of repeating calls, "
+                         f"no comments."}
+    return runner.run(job, description, timeout)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,10 +648,27 @@ def _plan(brief: str, style: str, sections_hint: str, device: str) -> dict:
         f"- Icons only from: {icons}.\n"
         "- Always open with navigation and close with a footer."
     )
-    data = gemini.as_json(prompt, tier=gemini.SMART, timeout_ms=90_000, default=None)
+    data = gemini.as_json(prompt, tier=gemini.SMART, timeout_ms=120_000, default=None)
     plan = _default_plan(brief, device)
     if not isinstance(data, dict):
+        print("[FigmaDesigner] no usable plan came back — using the default plan")
         return plan
+    try:
+        return _read_plan(data, plan)
+    except Exception as e:
+        print(f"[FigmaDesigner] plan was malformed ({e}) — using the default plan")
+        return plan
+
+
+def _as_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return list(value.values())
+    return [value] if value else []
+
+
+def _read_plan(data: dict, plan: dict) -> dict:
     title = _clean_text(data.get("title"), 60)
     if title:
         plan["title"] = title
@@ -624,7 +677,7 @@ def _plan(brief: str, style: str, sections_hint: str, device: str) -> dict:
             plan[key] = _clean_text(data[key], 400)
     plan["theme"] = _clean_theme(data.get("theme"))
     images = []
-    for img in (data.get("images") or [])[:MAX_PHOTOS]:
+    for img in _as_list(data.get("images"))[:MAX_PHOTOS]:
         if isinstance(img, dict) and _slug_key(img.get("key")) and img.get("query"):
             orientation = str(img.get("orientation") or "landscape").lower()
             images.append({"key": _slug_key(img["key"]), "query": _clean_text(img["query"], 80),
@@ -633,15 +686,16 @@ def _plan(brief: str, style: str, sections_hint: str, device: str) -> dict:
     if images:
         plan["images"] = images
     secs = []
-    for raw in (data.get("sections") or [])[:MAX_SECTIONS]:
+    for raw in _as_list(data.get("sections"))[:MAX_SECTIONS]:
         if not isinstance(raw, dict) or not _clean_text(raw.get("name"), 40):
             continue
-        background = str(raw.get("background") or "bg")
+        background = {"inversebg": "inverseBg"}.get(str(raw.get("background") or "bg").strip().lower(),
+                                                    str(raw.get("background") or "bg").strip().lower())
         secs.append({
             "name": _clean_text(raw["name"], 40),
             "layout": _clean_text(raw.get("layout"), 200),
             "background": background if background in ("bg", "surface", "surface2", "inverseBg", "primary") else "bg",
-            "images": [_slug_key(k) for k in (raw.get("images") or [])[:3] if _slug_key(k)],
+            "images": [_slug_key(k) for k in _as_list(raw.get("images"))[:3] if _slug_key(k)],
             "copy": _clean_copy(raw.get("copy")),
             "brief": _clean_text(raw.get("brief"), 400),
         })
@@ -1095,6 +1149,20 @@ def _action_edit(parameters: dict, player, instruction: str = "",
                         result=json.dumps(res.get("result"), ensure_ascii=False)[:300])
 
 
+def _locked(action):
+    """Edits, polish and scripts must not run into a design that is still
+    being built — the build's cleanup could remove what they add."""
+    def wrapper(parameters: dict, player) -> str:
+        if not _busy.acquire(blocking=False):
+            return outcome.failed("figma_design", "a design is being built right now — "
+                                  "wait for it to finish")
+        try:
+            return action(parameters, player)
+        finally:
+            _busy.release()
+    return wrapper
+
+
 def _action_polish(parameters: dict, player) -> str:
     state = _load_state()
     runner, why = _runner(parameters, state)
@@ -1323,9 +1391,9 @@ def _action_setup(parameters: dict, player) -> str:
 
 _ACTIONS = {
     "design": _action_design,
-    "edit": _action_edit,
-    "polish": _action_polish,
-    "script": _action_script,
+    "edit": _locked(_action_edit),
+    "polish": _locked(_action_polish),
+    "script": _locked(_action_script),
     "inspect": _action_inspect,
     "export": _action_export,
     "to_code": _action_to_code,
