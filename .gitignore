@@ -17,3 +17,7 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Windows launcher: private environment and its log
+.venv/
+jarvis_setup.log

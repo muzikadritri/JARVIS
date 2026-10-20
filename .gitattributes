@@ -1,0 +1,4 @@
+# Keep CRLF in the repository itself, so JARVIS.bat downloaded on its own
+# (raw link or ZIP) still has the line endings cmd.exe needs.
+*.bat -text
+*.cmd -text
