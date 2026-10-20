@@ -9,7 +9,7 @@
 // contract as Figma's own `use_figma` MCP tool, so code written for one runs
 // unchanged on the other.
 
-const PLUGIN_VERSION = "1.0";
+const PLUGIN_VERSION = "1.1";
 const MAX_SELECTION = 20;
 
 figma.showUI(__html__, { width: 320, height: 260, themeColors: true, title: "JARVIS Live Designer" });
