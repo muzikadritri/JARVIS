@@ -604,6 +604,57 @@ def test_figma_designer():
               robust.get("ok") and robust["result"]["lostSizing"] == "HUG"
               and any("hugs its content" in w for w in robust["result"]["warnings"]), robust)
 
+        safe = fd._run(fd._BridgeRunner(bridge),
+                       'const f = J.frame({ name: "Safe", dir: "row", width: 300 });\n'
+                       'const g = J.frame({ name: "Col", dir: "column", parent: f });\n'
+                       'const t = await J.text("Hello world", { parent: g, role: "body" });\n'
+                       'const found = await J.find(f, "hello");\n'
+                       'const missing = await J.find(f, "does not exist");\n'
+                       'await J.set(g, { dir: "horizontal", width: -40, fill: { type: "GRADIENT", '
+                       'gradientStops: [{ position: 0, color: "#FF0000" }, { position: 1, color: "#0000FF" }] } });\n'
+                       'await J.set(t, { role: "h2", color: "muted" });\n'
+                       'await J.step("broken fix", async () => { missing.children[0].x = 1; });\n'
+                       'const after = await J.step("good fix", async () => { f.name = "Safe (fixed)"; return 1; });\n'
+                       'const out = { fDir: f.layoutMode, gDir: g.layoutMode, gW: g.width, found: found && found.id === t.id, '
+                       'missing, fill: g.fills[0].type, size: t.fontSize, after, name: f.name, '
+                       'warnings: J.warnings.slice() };\nf.remove();\nreturn out;', "safe editing")
+        r = safe.get("result") or {}
+        check("dir 'row' / 'column' / 'horizontal' become valid Figma layout modes",
+              safe.get("ok") and r.get("fDir") == "HORIZONTAL" and r.get("gDir") == "HORIZONTAL", safe)
+        check("J.set clamps a negative width and turns a 'GRADIENT' paint into GRADIENT_LINEAR",
+              safe.get("ok") and r.get("gW") == 1 and r.get("fill") == "GRADIENT_LINEAR", safe)
+        check("J.find finds by text and returns null instead of throwing",
+              safe.get("ok") and r.get("found") and r.get("missing") is None, safe)
+        check("J.set applies a text role", safe.get("ok") and r.get("size") == 48, safe)
+        check("a failing J.step is reported while the next step still runs",
+              safe.get("ok") and r.get("after") == 1 and r.get("name") == "Safe (fixed)"
+              and fd._failed_steps(safe) and "broken fix" in fd._failed_steps(safe)[0], safe)
+
+        # Keep-best: a round that scores lower is undone, the best score is reported.
+        calls = []
+        real_review, real_backup, real_restore, real_remove = (
+            fd._review_and_fix, fd._backup_page, fd._restore_page, fd._remove_node)
+        scores = iter([6, 7, 5, 7, 7])
+
+        def fake_review(runner, root_id, plan, theme, player, assets=None, instruction="",
+                        skip_fixes=False, given=None):
+            if skip_fixes:
+                return {"score": next(scores), "sections": [], "applied": False, "raw": {}}
+            calls.append(("fix", root_id))
+            return {"score": None, "applied": True}
+        fd._review_and_fix = fake_review
+        fd._backup_page = lambda runner, root_id: f"backup-of-{root_id}"
+        fd._restore_page = lambda runner, root_id, backup_id: (calls.append(("restore", backup_id)) or backup_id)
+        fd._remove_node = lambda runner, node_id: calls.append(("remove", node_id))
+        try:
+            rep = fd._improve_until_good(None, "page", {}, {}, FakePlayer(), rounds=8)
+        finally:
+            fd._review_and_fix, fd._backup_page, fd._restore_page, fd._remove_node = (
+                real_review, real_backup, real_restore, real_remove)
+        check("the improve loop keeps the best version, undoes a worse round and stops when stale",
+              rep.get("score") == 7 and rep.get("history") == [6, 7, 5, 7]
+              and ("restore", "backup-of-page") in calls and rep.get("applied"), (rep, calls))
+
         player = FakePlayer()
         fd._busy.acquire()
         fd._design_worker({"brief": "landing page for a coffee roastery", "style": "warm, dark"},

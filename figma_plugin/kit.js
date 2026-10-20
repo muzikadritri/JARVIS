@@ -128,13 +128,76 @@ const J = (() => {
   const isDark = (color) => luminance(color) < 0.2;
 
   function paint(color, opacity) {
-    if (color && typeof color === "object" && typeof color.type === "string") return color;
+    if (color && typeof color === "object" && typeof color.type === "string") return fixPaint(color);
     const resolved = resolve(color);
     return { type: "SOLID", color: hex(resolved), opacity: opacity ?? alphaOf(resolved) };
   }
   const paints = (fill) =>
     fill === undefined || fill === null ? [] : [].concat(fill)
-      .filter((f) => f && f !== "transparent" && f !== "none").map((f) => paint(f));
+      .filter((f) => f && f !== "transparent" && f !== "none").map((f) => paint(f)).filter(Boolean);
+
+  // Model-written paints come in every dialect ("GRADIENT", "linear", a CSS
+  // colour in `color`, stops without a transform). Figma rejects the whole
+  // fills array for one bad entry, so each paint is mapped onto a valid one,
+  // or dropped with a warning when there is nothing to save.
+  const PAINT_TYPES = {
+    SOLID: "SOLID", COLOR: "SOLID", GRADIENT: "GRADIENT_LINEAR", LINEAR: "GRADIENT_LINEAR",
+    LINEAR_GRADIENT: "GRADIENT_LINEAR", GRADIENT_LINEAR: "GRADIENT_LINEAR", RADIAL: "GRADIENT_RADIAL",
+    RADIAL_GRADIENT: "GRADIENT_RADIAL", GRADIENT_RADIAL: "GRADIENT_RADIAL", GRADIENT_ANGULAR: "GRADIENT_ANGULAR",
+    ANGULAR: "GRADIENT_ANGULAR", GRADIENT_DIAMOND: "GRADIENT_DIAMOND", IMAGE: "IMAGE", VIDEO: "VIDEO",
+    PATTERN: "PATTERN",
+  };
+  function fixPaint(p) {
+    const type = PAINT_TYPES[String(p.type).toUpperCase().replace(/[\s-]+/g, "_")];
+    if (!type) {
+      warn(`paint type ${p.type} is not a Figma paint — dropped`);
+      return null;
+    }
+    // Already valid (the kit's own paints): left exactly as they are.
+    if (type === p.type) {
+      if (type === "SOLID" && p.color && typeof p.color.r === "number") {
+        const { a, ...rgb } = p.color;
+        return a !== undefined && p.opacity === undefined ? { ...p, color: rgb, opacity: a } : { ...p, color: rgb };
+      }
+      if (type.startsWith("GRADIENT") && Array.isArray(p.gradientStops) && Array.isArray(p.gradientTransform)) return p;
+      if (!type.startsWith("GRADIENT") && type !== "SOLID") return p;
+    }
+    if (type === "SOLID") {
+      const resolved = resolve(p.color === undefined ? theme.surface : p.color);
+      const c = typeof resolved === "object" && "r" in resolved ? resolved : hex(resolved);
+      const out = { type, color: { r: c.r, g: c.g, b: c.b } };
+      const alpha = p.opacity ?? (typeof resolved === "object" && "a" in resolved ? resolved.a : alphaOf(resolved));
+      if (alpha !== undefined && alpha < 1) out.opacity = alpha;
+      if (p.visible === false) out.visible = false;
+      return out;
+    }
+    if (type.startsWith("GRADIENT")) {
+      const stops = p.gradientStops || p.stops || p.colors;
+      if (!Array.isArray(stops) || stops.length < 2) {
+        return Array.isArray(stops) && stops.length ? paint(stops[0].color || stops[0]) : null;
+      }
+      const built = gradient(stops, p.angle ?? 90, { type: type === "GRADIENT_RADIAL" ? "radial" : undefined });
+      const out = { ...built, type: type === "GRADIENT_RADIAL" ? "GRADIENT_RADIAL" : (type === "GRADIENT_LINEAR" ? built.type : type) };
+      if (Array.isArray(p.gradientTransform) && p.gradientTransform.length === 2) out.gradientTransform = p.gradientTransform;
+      if (p.opacity !== undefined) out.opacity = p.opacity;
+      return out;
+    }
+    return p;
+  }
+
+  // Layout direction in any spelling the model uses.
+  const DIRS = {
+    HORIZONTAL: "HORIZONTAL", ROW: "HORIZONTAL", X: "HORIZONTAL", H: "HORIZONTAL", INLINE: "HORIZONTAL",
+    VERTICAL: "VERTICAL", COLUMN: "VERTICAL", COL: "VERTICAL", Y: "VERTICAL", V: "VERTICAL", STACK: "VERTICAL",
+    BLOCK: "VERTICAL", NONE: "NONE", ABSOLUTE: "NONE", FREE: "NONE", GRID: "VERTICAL", WRAP: "HORIZONTAL",
+  };
+  function normDir(value, fallback = "VERTICAL") {
+    if (value === undefined || value === null || value === "") return fallback;
+    const key = String(value).toUpperCase().replace(/[\s_-]+/g, "");
+    if (DIRS[key]) return DIRS[key];
+    warn(`layout direction ${value} unknown — used ${fallback}`);
+    return fallback;
+  }
 
   // Linear gradient at `angle` degrees (0 = left→right, 90 = top→bottom), or
   // with {css: true} a CSS angle (90deg = left→right). {type: "radial"} makes a
@@ -390,8 +453,8 @@ const J = (() => {
     opts = clean(opts);
     const node = track(figma.createFrame());
     node.name = opts.name || "Frame";
-    const dir = opts.dir === undefined ? "VERTICAL" : opts.dir;
-    const wraps = Boolean(opts.wrap) && dir === "HORIZONTAL";
+    const dir = normDir(opts.dir ?? opts.layoutMode);
+    const wraps = (Boolean(opts.wrap) || String(opts.dir).toUpperCase() === "WRAP") && dir === "HORIZONTAL";
     // A wrapping row only wraps when something other than its content decides
     // its width; hugging, it just grows wider. So it fills its parent unless
     // it was given a width.
@@ -405,7 +468,7 @@ const J = (() => {
     // resize() FIRST: on an auto-layout frame it resets both sizing modes to
     // FIXED, so hugging set before it would silently be lost.
     if (opts.width || opts.height) {
-      node.resize(opts.width || node.width || 100, opts.height || node.height || 100);
+      node.resize(Math.max(1, opts.width || node.width || 100), Math.max(1, opts.height || node.height || 100));
     }
     if (dir !== "NONE") {
       node.layoutMode = dir;
@@ -857,6 +920,104 @@ const J = (() => {
     return found;
   }
 
+  // ── safe editing ──────────────────────────────────────────────────────────
+  // An edit applies several independent fixes. One broken fix must not throw
+  // away the others, so each runs as a step: a failure becomes a warning that
+  // names the step, and the rest of the edit still lands.
+  const stepFailures = [];
+  async function step(label, fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      const message = `step failed: ${label}: ${err && err.message ? err.message : err}`.slice(0, 300);
+      stepFailures.push(message);
+      warn(message);
+      return null;
+    }
+  }
+
+  // A layer by id, exact name, name fragment or text content — null when
+  // there is none, instead of the "cannot read property of undefined" a
+  // chained children[0].children[2] lookup throws.
+  async function find(scope, query) {
+    let root = scope;
+    if (typeof scope === "string") root = await figma.getNodeByIdAsync(scope);
+    if (!root || root.removed) return null;
+    if (query === undefined || query === null || query === "") return root;
+    const q = String(query);
+    if (/^I?\d+:\d+/.test(q)) {
+      const byId = await figma.getNodeByIdAsync(q);
+      if (byId) return byId;
+    }
+    if (!("findAll" in root)) return null;
+    const low = q.toLowerCase();
+    return root.findOne((n) => n.name === q)
+      || root.findOne((n) => n.name.toLowerCase() === low)
+      || root.findOne((n) => n.name.toLowerCase().includes(low))
+      || root.findOne((n) => n.type === "TEXT" && n.characters.toLowerCase().includes(low))
+      || null;
+  }
+
+  // Property changes with every value checked: direction spellings, paints,
+  // sizes that can never go negative, theme colour names, text roles. A
+  // property Figma still refuses is reported as a warning, not thrown.
+  async function set(target, props = {}) {
+    const n = typeof target === "string" ? await figma.getNodeByIdAsync(target) : target;
+    if (!n || n.removed) { warn(`set: layer ${target && target.id ? target.id : target} not found`); return null; }
+    const p = { ...props };
+    const tryAssign = (key, value) => {
+      try { n[key] = value; } catch (err) { warn(`set ${n.name}.${key}: ${err.message || err}`.slice(0, 200)); }
+    };
+    if ("dir" in p || "layoutMode" in p) {
+      tryAssign("layoutMode", normDir(p.dir ?? p.layoutMode, "VERTICAL"));
+      delete p.dir; delete p.layoutMode;
+    }
+    if ("width" in p || "height" in p) {
+      const w = num(p.width); const h = num(p.height);
+      try {
+        n.resize(Math.max(1, w ?? n.width), Math.max(1, h ?? n.height));
+      } catch (err) { warn(`set ${n.name} size: ${err.message || err}`); }
+      delete p.width; delete p.height;
+    }
+    for (const key of ["fill", "fills", "stroke", "strokes"]) {
+      if (!(key in p)) continue;
+      const prop = key.startsWith("fill") ? "fills" : "strokes";
+      tryAssign(prop, paints(p[key]));
+      delete p[key];
+    }
+    if ("gap" in p) { tryAssign("itemSpacing", Math.max(0, num(p.gap) ?? 0)); delete p.gap; }
+    if ("pad" in p) { try { padding(n, p.pad); } catch (err) { warn(`set pad: ${err.message}`); } delete p.pad; }
+    if ("radius" in p) { tryAssign("cornerRadius", Math.max(0, num(p.radius === true ? theme.radius : p.radius) ?? 0)); delete p.radius; }
+    if ("shadow" in p) { tryAssign("effects", p.shadow ? shadows(p.shadow === true ? 2 : p.shadow) : []); delete p.shadow; }
+    if (n.type === "TEXT" && ("role" in p || "size" in p || "color" in p || "text" in p || "characters" in p)) {
+      try {
+        if (n.fontName !== figma.mixed) await figma.loadFontAsync(n.fontName);
+        else n.fontName = await font(theme.bodyFont, "Regular");
+        const r = p.role ? RAMP[p.role] : null;
+        if (p.role && !r) warn(`unknown text role "${p.role}"`);
+        if (r) {
+          const heading = r.font === "heading";
+          n.fontName = await font(heading ? theme.headingFont : theme.bodyFont,
+            r.weight || (heading ? theme.headingWeight : "Regular"));
+          n.fontSize = r.size[mobile() ? 1 : 0];
+          const lh = parseLineHeight(r.lh);
+          if (lh) n.lineHeight = lh;
+          const ls = parseSpacing(r.ls);
+          if (ls) n.letterSpacing = ls;
+          n.textCase = r.upper ? "UPPER" : "ORIGINAL";
+        }
+        if (p.size) n.fontSize = Math.max(1, num(p.size) ?? n.fontSize);
+        if (p.color) {
+          n.fills = paints(["text", "muted"].includes(p.color) ? onColor(n.parent, p.color) : p.color);
+        }
+        if (p.text !== undefined || p.characters !== undefined) n.characters = String(p.text ?? p.characters);
+      } catch (err) { warn(`set text ${n.name}: ${err.message || err}`); }
+      for (const k of ["role", "size", "color", "text", "characters"]) delete p[k];
+    }
+    for (const [key, value] of Object.entries(p)) tryAssign(key, value);
+    return n;
+  }
+
   function focus(nodes) {
     const list = [].concat(nodes).filter(Boolean);
     if (!list.length) return;
@@ -1007,5 +1168,6 @@ const J = (() => {
     hex, paint, gradient, shadow, shadows, font, frame, stack, hstack, text, rect, ellipse, glow,
     image, photo, icon, button, badge, card, stat, avatar, divider, section, container, row, col,
     node, focus, summary, outline, spec, audit, toHex, attach, padding, luminance,
+    step, stepFailures, find, set, normDir, fixPaint,
   };
 })();
