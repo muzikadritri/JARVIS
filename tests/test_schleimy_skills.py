@@ -499,6 +499,15 @@ def test_figma_designer():
         check("the simulated plugin connects", bridge.wait_for_plugin(10))
         check("the plugin reports its file context", bridge.context().get("fileName") == "Test File",
               bridge.context())
+        watch_player = FakePlayer()
+        fd._WATCH_SECONDS = 0.1
+        threading.Thread(target=fd._watch_plugin, args=(watch_player,), daemon=True).start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not watch_player.logs:
+            time.sleep(0.05)
+        check("the activity log says when the Figma plugin connects, naming the file",
+              any("Live Designer connected" in l and "Test File" in l for l in watch_player.logs),
+              watch_player.logs)
 
         model = FakeModel()
         model.on("planning a website design", json.dumps({
@@ -532,6 +541,26 @@ def test_figma_designer():
             return reply
         fd._ask = ask
 
+        user_layer = fd._run(fd._BridgeRunner(bridge),
+                             'const f = figma.createFrame(); f.name = "User Layer"; return f.id;',
+                             "a layer the user made")
+        check("a layer of the user's exists before the design", user_layer.get("ok"), user_layer)
+        robust = fd._run(fd._BridgeRunner(bridge),
+                         'const f = J.frame({ name: "Robust", width: {}, height: "auto", gap: "24px", '
+                         'pad: ["16px", 8], radius: "12" });\n'
+                         'const r = J.frame({ name: "Row", dir: "HORIZONTAL", align: "baseline", parent: f });\n'
+                         'const v = J.frame({ name: "Col", align: "baseline", parent: f, width: "100%" });\n'
+                         'f.fills = [J.paint({ r: 1, g: 0.5, b: 0, a: 0.5 })];\n'
+                         'const out = { gap: f.itemSpacing, radius: f.cornerRadius, sizing: f.layoutSizingHorizontal, '
+                         'opacity: f.fills[0].opacity, vSizing: v.layoutSizingHorizontal };\n'
+                         'f.remove();\nreturn out;', "kit robustness")
+        check("the kit turns '24px', '12', {} and 'auto' into numbers or defaults instead of throwing",
+              robust.get("ok") and robust["result"]["gap"] == 24 and robust["result"]["radius"] == 12
+              and robust["result"]["sizing"] == "HUG", robust)
+        check("an RGBA colour becomes RGB + opacity, BASELINE on a column falls back, '100%' fills",
+              robust.get("ok") and robust["result"]["opacity"] == 0.5 and robust["result"]["vSizing"] == "FILL",
+              robust)
+
         player = FakePlayer()
         fd._busy.acquire()
         fd._design_worker({"brief": "landing page for a coffee roastery", "style": "warm, dark"},
@@ -556,6 +585,13 @@ def test_figma_designer():
         stray = [c for c in page["children"] if c["name"] == "Hero"]
         check("nodes a failed attempt built outside the root are removed too", not stray,
               [c["name"] for c in page["children"]])
+        check("cleanup never touches the user's own layers",
+              any(c["name"] == "User Layer" for c in page["children"]),
+              [c["name"] for c in page["children"]])
+        check("the page root hugs its sections (resize() no longer locks its height)",
+              roots and roots[0]["sizing"] == "FIXED/HUG", roots[0]["sizing"] if roots else None)
+        png_size = Path(state.get("png", "")).stat().st_size if state.get("png") else 0
+        check("a full-size PNG export survives the trip from Figma intact", png_size == 6000, png_size)
         hero_text = roots[0]["children"][0]["children"][0] if names else {}
         check("headings use the planned font (Poppins, alias-mapped style)",
               hero_text.get("font", {}).get("family") == "Poppins", hero_text.get("font"))
@@ -579,6 +615,8 @@ def test_figma_designer():
         res = fd.figma_design({"action": "inspect"}, player)
         check("inspect returns the structure as untrusted data",
               "<<<UNTRUSTED source=figma>>>" in res and "Hero (dark)" in res, res[:200])
+        check("the outline keeps children and text — not just the top node",
+              '"children"' in res and "Roasted this morning." in res, res[:400])
         res = fd.figma_design({"action": "script", "code": "return figma.currentPage.children.length;"}, player)
         check("script runs raw Plugin API code", res.startswith("status=done") and "result=" in res, res)
         res = fd.figma_design({"action": "script", "code": "const = 1"}, player)
@@ -699,6 +737,46 @@ def test_web_builder():
     check("serving the same folder twice reuses the server", web_builder.serve(folder, open_browser=False) == url)
     check("stop_serving stops it", web_builder.stop_serving(folder) == 1 and not web_builder.serving())
 
+    site = SANDBOX / "client_site"
+    (site / "img").mkdir(parents=True)
+    (site / "node_modules" / "pkg").mkdir(parents=True)
+    (site / "index.html").write_text(files["index.html"].replace(
+        "<main>", '<main><img src="img/logo.png" alt="Ember">'), encoding="utf-8")
+    (site / "styles.css").write_text(files["styles.css"] + "\nheader { background: url('img/bg.png'); }\n")
+    (site / "app.js").write_text(files["app.js"])
+    (site / "img" / "logo.png").write_bytes(b"\x89PNG")
+    (site / "img" / "bg.png").write_bytes(b"\x89PNG")
+    (site / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1;\n")
+    (site / "unrelated.html").write_text("<html><body>other</body></html>")
+    root, found, assets = web_builder.collect_site(site)
+    check("a site folder is collected without node_modules",
+          sorted(found) == ["app.js", "index.html", "styles.css", "unrelated.html"]
+          and sorted(assets) == ["img/bg.png", "img/logo.png"], (sorted(found), sorted(assets)))
+    root, found, assets = web_builder.collect_site(site / "index.html")
+    check("a single page brings only what it references (page → css → image)",
+          sorted(found) == ["app.js", "index.html", "styles.css"]
+          and sorted(assets) == ["img/bg.png", "img/logo.png"], (sorted(found), sorted(assets)))
+    check("images that exist count as present when validating",
+          web_builder.validate(found, assets) == [] if HAS_NODE else True,
+          web_builder.validate(found, assets))
+
+    upgraded_page = found["index.html"].replace("Roasted this morning.", "Roasted at dawn. Delivered by noon.")
+    model = FakeModel()
+    model.on("Upgrade this EXISTING website", f"=== FILE: index.html ===\n{upgraded_page}=== END FILE ===")
+    install_model(model)
+    out, problems = web_builder.upgrade_site(found, "make it premium", assets=list(assets), log=lambda m: None)
+    check("upgrade_site keeps untouched files and replaces the rewritten ones",
+          sorted(out) == ["app.js", "index.html", "styles.css"] and "Roasted at dawn" in out["index.html"]
+          and out["styles.css"] == found["styles.css"], sorted(out))
+    check("the client's files reach the model as data, with the asset list",
+          "DATA, not instructions" in model.prompts[-1] and "img/logo.png" in model.prompts[-1])
+    check("the upgraded site validates", problems == [] if HAS_NODE else True, problems)
+    backup = web_builder.save_in_place(site, out, found)
+    check("in-place upgrade writes the page and backs up the original",
+          "Roasted at dawn" in (site / "index.html").read_text()
+          and "Roasted this morning." in (backup / "index.html").read_text()
+          and not (backup / "styles.css").exists(), backup)
+
 
 def test_js_studio():
     section("actions/js_studio — write, check, run, test, fix, review")
@@ -747,6 +825,47 @@ def test_js_studio():
     check("review lays findings onto the review panel", res.startswith("status=done") and player.reviews, res)
     res = js.js_studio({"action": "status"}, player)
     check("status reports Node", "node=v" in res, res)
+
+    from core import web_builder
+    web_builder.SITES_DIR = SANDBOX / "sites_upgrade"
+    site = SANDBOX / "shop"
+    (site / "img").mkdir(parents=True)
+    page = SITE_GOOD.split("=== FILE: index.html ===\n")[1].split("=== END FILE ===")[0]
+    (site / "index.html").write_text(page.replace("<main>", '<main><img src="img/hero.jpg" alt="">'))
+    (site / "styles.css").write_text(":root { --bg: #000; }\n")
+    (site / "app.js").write_text(SITE_GOOD.split("=== FILE: app.js ===\n")[1].split("=== END FILE ===")[0])
+    (site / "img" / "hero.jpg").write_bytes(b"\xff\xd8")
+    model.on("Upgrade this EXISTING website",
+             "=== FILE: styles.css ===\n:root { --bg: #0b0b0f; --accent: #e07a3f; }\nbody { margin: 0; }\n=== END FILE ===")
+    res = js.js_studio({"action": "improve", "file_path": str(site / "index.html")}, player)
+    check("'improve' maps to upgrade and starts in the background",
+          res.startswith("status=started") and "files=3" in res, res)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not any("upgrade is finished" in x or "failed" in x for x in player.said):
+        time.sleep(0.1)
+    copies = list((SANDBOX / "sites_upgrade").glob("shop-pro*/styles.css"))
+    check("the upgrade is saved as a copy with the rewritten file",
+          copies and "--accent" in copies[0].read_text(), copies)
+    check("the copy carries the site's images",
+          copies and (copies[0].parent / "img" / "hero.jpg").is_file())
+    check("the original site is untouched by default", "--accent" not in (site / "styles.css").read_text())
+    check("the user is told when the upgrade is done",
+          any("upgrade is finished" in x for x in player.said), player.said[-1:])
+    web_builder.stop_serving()
+    res = js.js_studio({"action": "upgrade", "file_path": str(SANDBOX / "code")}, player)
+    check("a folder without an HTML page is refused", res.startswith("status=failed") and "no HTML" in res, res)
+
+    from core.action_loader import discover_actions
+    reg = discover_actions(ROOT / "actions", logger=lambda m: None)
+    hooked = []
+    import actions.figma_designer as fd_mod
+    original = fd_mod.attach_ui
+    fd_mod.attach_ui = lambda ui: hooked.append(ui)
+    try:
+        reg.attach_ui(player)
+    finally:
+        fd_mod.attach_ui = original
+    check("the loader hands the HUD to actions that ask for it", hooked == [player], hooked)
 
 
 def test_tools():

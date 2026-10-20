@@ -92,8 +92,15 @@ FIGMA PLUGIN API RULES — the code runs as the BODY of an async function with
 `figma` in scope, and the JARVIS kit is already loaded as `J`:
 - `await` every *Async call. NEVER use: assigning figma.currentPage (use
   `await figma.setCurrentPageAsync(page)`), figma.loadAllPagesAsync,
-  setPluginData, figma.createImageAsync, figma.closePlugin, figma.ui, fetch,
-  window/document, require or import. Plain JavaScript only, no TypeScript.
+  setPluginData, figma.createImageAsync, figma.closePlugin, figma.ui,
+  figma.notify, fetch, window/document, require or import. Plain JavaScript
+  only, no TypeScript.
+- The file uses dynamic page loading, so the SYNC lookups throw: never
+  figma.getNodeById, figma.getStyleById, figma.getLocal*Styles or the sync
+  figma.variables getters — use `await J.node(id)` / the *Async variants.
+- Sizes, gaps, paddings, radii and font sizes are plain NUMBERS (pixels) —
+  never strings like "100%" or "auto", never objects. Fill the width with
+  `fillWidth: true`; hug by leaving the size out.
 - Build with the kit. Raw API calls are fine where the kit has nothing; then
   load fonts with `await J.font(family, style)` before setting characters,
   set layoutSizingHorizontal/Vertical only AFTER appendChild into an
@@ -218,10 +225,11 @@ def _kit() -> str:
         raise RuntimeError(f"the design kit is missing ({KIT_PATH}): {e}") from e
 
 
-def _job(code: str, theme: Optional[dict] = None) -> str:
-    """Kit + theme + the model's code, as one async-function body."""
+def _job(code: str, theme: Optional[dict] = None, assets: Optional[dict] = None) -> str:
+    """Kit + theme + assets + the model's code, as one async-function body."""
     theme_js = f"J.setTheme({json.dumps(theme, ensure_ascii=False)});\n" if theme else ""
-    return f"{_kit()}\n{theme_js}\n{code}\n"
+    assets_js = f"J.setAssets({json.dumps(assets)});\n" if assets else ""
+    return f"{_kit()}\n{theme_js}{assets_js}\n{code}\n"
 
 
 def _file_key(parameters: dict, state: dict, bridge_ctx: dict) -> str:
@@ -326,8 +334,12 @@ def _runner(parameters: dict, state: dict, wait: float = 3.0) -> tuple[Optional[
 
 
 def _run(runner: _Runner, code: str, description: str, theme: Optional[dict] = None,
-         timeout: float = JOB_TIMEOUT) -> dict:
-    return runner.run(_job(code, theme), description, timeout)
+         timeout: float = JOB_TIMEOUT, assets: Optional[dict] = None) -> dict:
+    # Figma's own use_figma takes at most 50,000 characters of code, so photos
+    # travel only over the plugin bridge.
+    if assets and not isinstance(runner, _BridgeRunner):
+        assets = None
+    return runner.run(_job(code, theme, assets), description, timeout)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,26 +477,49 @@ return J.summary(root);
     return _run(runner, code, f"Creating page “{title}”", {**theme, "width": width, "pagePad": pad})
 
 
-def _snapshot(runner: _Runner, root_id: str) -> dict:
-    """Ids under the root AND at page level, so a failed attempt can be undone
-    wherever it put things — a model that misreads the task sometimes builds
-    its section on the page instead of inside the root."""
+def _snapshot(runner: _Runner, root_id: str) -> Optional[list[str]]:
+    """The root's children before a section is attempted, or None.
+
+    None means "unknown", and unknown means NOTHING is pruned by comparison
+    later. A cleanup that guesses deletes the user's work, so it fails closed:
+    a snapshot that did not come back whole is not used at all."""
     res = _run(runner, f"const root = await J.node({json.dumps(root_id)});\n"
-                       "return { root: root.children.map((c) => c.id), "
-                       "page: figma.currentPage.children.map((c) => c.id) };",
+                       "return { ids: root.children.map((c) => c.id), count: root.children.length };",
                "Reading the page")
     data = res.get("result") if res.get("ok") else None
-    return data if isinstance(data, dict) else {"root": [], "page": []}
+    if (isinstance(data, dict) and isinstance(data.get("ids"), list)
+            and data.get("count") == len(data["ids"])):
+        return [str(i) for i in data["ids"]]
+    return None
 
 
-def _remove_new_children(runner: _Runner, root_id: str, keep: dict) -> None:
-    code = (f"const root = await J.node({json.dumps(root_id)});\n"
-            f"const keepRoot = new Set({json.dumps(keep.get('root') or [])});\n"
-            f"const keepPage = new Set({json.dumps((keep.get('page') or []) + [root_id])});\n"
-            "for (const child of [...root.children]) if (!keepRoot.has(child.id)) child.remove();\n"
-            "for (const child of [...figma.currentPage.children]) if (!keepPage.has(child.id)) child.remove();\n"
-            "return true;")
-    _run(runner, code, "Cleaning up a failed section")
+def _cleanup_failed(runner: _Runner, root_id: str, keep: Optional[list[str]],
+                    failed: dict) -> None:
+    """Undo what a failed attempt left behind — and nothing else.
+
+    Two sources, both exact: the ids the job itself created through the kit
+    (code.js returns them with the error), and new children of the page root
+    compared against a snapshot that came back whole. Nothing else on any page
+    is ever touched, whichever page the user is looking at by now."""
+    created = [str(i) for i in (failed.get("created") or [])]
+    if not created and keep is None:
+        return
+    lines = [f"const created = {json.dumps(created)};",
+             f"const rootId = {json.dumps(root_id or '')};",
+             "let removed = 0;",
+             "for (const id of created) {",
+             "  if (id === rootId) continue;",
+             "  const n = await figma.getNodeByIdAsync(id);",
+             "  if (n && !n.removed) { n.remove(); removed++; }",
+             "}"]
+    if keep is not None and root_id:
+        lines += [f"const keep = new Set({json.dumps(keep)});",
+                  "const root = await figma.getNodeByIdAsync(rootId);",
+                  "if (root && 'children' in root) {",
+                  "  for (const c of [...root.children]) if (!keep.has(c.id)) { c.remove(); removed++; }",
+                  "}"]
+    lines.append("return removed;")
+    _run(runner, "\n".join(lines), "Cleaning up a failed attempt")
 
 
 def _target_id(parameters: dict, state: dict, ctx: dict) -> str:
@@ -520,7 +555,10 @@ def _export_png(runner: _Runner, node_id: str, scale: float) -> tuple[Optional[b
         data = (res.get("result") or {}).get("png") if isinstance(res.get("result"), dict) else None
         if not data:
             return None, "Figma returned no image"
-        return base64.b64decode(data), ""
+        try:
+            return base64.b64decode(str(data), validate=True), ""
+        except (ValueError, TypeError) as e:
+            return None, f"the image from Figma was damaged in transit ({e})"
     if isinstance(runner, _McpRunner):
         from core import mcp_client
         try:
@@ -546,26 +584,32 @@ def _save_png(data: bytes, name: str) -> Path:
 
 def _execute_with_fixes(runner: _Runner, task: str, description: str, theme: dict,
                         attempts: int, log: Callable[[str], None],
-                        before_retry: Optional[Callable[[], None]] = None) -> dict:
-    """Generate → check → run, feeding every failure back to the model."""
+                        on_failure: Optional[Callable[[dict], None]] = None,
+                        assets: Optional[dict] = None) -> dict:
+    """Generate → check → run, feeding every failure back to the model.
+
+    `on_failure` runs after EVERY attempt that ran in Figma and failed — the
+    last one included — with that attempt's result, so whatever it half-built
+    is removed before the next try and never left behind at the end."""
     code, syntax_err = _generate_checked(task)
     last_error = syntax_err or ""
     for attempt in range(attempts + 1):
         if not code:
             return {"ok": False, "error": last_error or "no model answered"}
         if syntax_err:
-            res = {"ok": False, "error": f"SyntaxError before running: {syntax_err}", "logs": []}
+            res = {"ok": False, "error": f"SyntaxError before running: {syntax_err}",
+                   "logs": [], "ran": False}
         else:
-            res = _run(runner, code, description, theme)
+            res = _run(runner, code, description, theme, assets=assets)
         if res.get("ok"):
             res["code"] = code
             return res
         last_error = res.get("error") or "unknown error"
+        if on_failure and res.get("ran", True):
+            on_failure(res)
         if attempt == attempts:
             break
         log(f"{description}: fixing ({last_error[:120]})")
-        if before_retry:
-            before_retry()
         code, syntax_err = _generate_checked(_fix_prompt(task, code, last_error, res.get("logs") or []))
     return {"ok": False, "error": last_error}
 
@@ -603,18 +647,24 @@ def _design_worker(parameters: dict, player) -> None:
                 runner, _section_task(plan, i, root_id, brief, style, device),
                 f"{sec['name']} ({i + 1}/{len(plan['sections'])})", theme,
                 SECTION_FIX_ATTEMPTS, lambda m: _log(player, m),
-                before_retry=lambda: _remove_new_children(runner, root_id, keep))
+                on_failure=lambda failed_res, keep=keep: _cleanup_failed(runner, root_id, keep, failed_res))
             if res.get("ok"):
                 built.append(sec["name"])
             else:
-                _remove_new_children(runner, root_id, keep)
                 failed.append(sec["name"])
                 _log(player, f"{sec['name']} skipped: {res.get('error', '')[:160]}")
         _run(runner, f"J.focus(await J.node({json.dumps(root_id)})); return true;", "Showing the page")
         png_path = ""
-        data, err = _export_png(runner, root_id, 1.0)
-        if data:
-            png_path = str(_save_png(data, plan["title"]))
+        try:
+            data, err = _export_png(runner, root_id, 1.0)
+            if data:
+                png_path = str(_save_png(data, plan["title"]))
+            else:
+                _log(player, f"PNG export skipped: {err}")
+        except Exception as e:
+            # The design is finished and in Figma; a failed export is a footnote,
+            # never a reason to report the whole design as failed.
+            _log(player, f"PNG export skipped: {e}")
         state["last"] = {"root_id": root_id, "title": plan["title"], "theme": theme,
                          "device": device, "brief": brief, "style": style,
                          "sections": built, "png": png_path, "when": time.time(),
@@ -688,7 +738,8 @@ def _action_edit(parameters: dict, player, instruction: str = "") -> str:
             f"Finish with `const t = await J.node(\"{target}\"); J.focus(t); return J.summary(t);`\n"
             "Return ONLY the JavaScript.")
     res = _execute_with_fixes(runner, task, f"Editing: {instruction[:60]}", theme,
-                              EDIT_FIX_ATTEMPTS, lambda m: _log(player, m))
+                              EDIT_FIX_ATTEMPTS, lambda m: _log(player, m),
+                              on_failure=lambda failed_res: _cleanup_failed(runner, "", None, failed_res))
     if not res.get("ok"):
         return outcome.failed("figma_design", f"the change could not be applied: "
                               f"{str(res.get('error'))[:300]}", node=target)
@@ -889,6 +940,7 @@ def _action_status(parameters: dict, player) -> str:
         figma_mcp=info if reachable else f"off ({info[:120]})",
         mcp_tools=",".join(tools[:12]) or None,
         can_write_via_mcp="use_figma" in tools,
+        file_key=_file_key({}, _load_state(), ctx) or None,
         node=node_runtime.node_version() or "not installed",
         last_design=last.get("title"),
     )
@@ -974,6 +1026,47 @@ def _autostart() -> None:
 
 
 threading.Thread(target=_autostart, daemon=True, name="figma-bridge-start").start()
+
+_WATCH_SECONDS = 2.0
+_watching = threading.Event()
+
+
+def _watch_plugin(ui) -> None:
+    """Say in the activity log when the Figma plugin connects or goes away.
+
+    Without this the only way to know whether Figma is linked is to ask, and a
+    user who opened the plugin and sees nothing happen has no idea whether it
+    worked. The log line names the file and the sentence to say next."""
+    was = False
+    while True:
+        time.sleep(_WATCH_SECONDS)
+        try:
+            bridge = _bridge()
+            now = bridge.connected()
+        except Exception as e:
+            print(f"[FigmaDesigner] watcher: {e}")
+            continue
+        if now == was:
+            continue
+        was = now
+        if now:
+            name = bridge.context().get("fileName") or "the open file"
+            _log(ui, f"Live Designer connected — {name}. Say: \"design a landing page for …\"")
+        else:
+            _log(ui, "Live Designer disconnected — the plugin window in Figma was closed.")
+
+
+def attach_ui(ui) -> None:
+    """Called by core.action_loader once the HUD exists."""
+    if os.environ.get("JARVIS_NO_FIGMA_BRIDGE") == "1":
+        return
+    if _config().get("figma_bridge_autostart", True) is False:
+        return
+    if _watching.is_set():
+        return
+    _watching.set()
+    threading.Thread(target=_watch_plugin, args=(ui,), daemon=True,
+                     name="figma-plugin-watch").start()
 
 
 TOOL = {

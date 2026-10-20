@@ -7,6 +7,14 @@
 // in Inter, "SemiBold" in most Google fonts). Everything lives under ONE name,
 // `J`, so a job can declare whatever it likes without colliding with the kit.
 const J = (() => {
+  // Every node this job creates through the kit, so a job that fails halfway
+  // can be undone exactly — code.js reports this list with the error.
+  const created = (globalThis.__jarvisCreated = []);
+  const track = (node) => {
+    created.push(node.id);
+    return node;
+  };
+
   const theme = {
     bg: "#0B0F17", surface: "#121826", surface2: "#1A2233", text: "#F5F7FB",
     muted: "#9AA4B2", primary: "#4F8CFF", accent: "#22D3EE", onPrimary: "#FFFFFF",
@@ -31,13 +39,22 @@ const J = (() => {
   };
   const fontCache = new Map();
 
+  // Binary assets JARVIS fetched for this job (photos, as base64), by key.
+  const assets = {};
+  function setAssets(map) {
+    if (map && typeof map === "object") Object.assign(assets, map);
+    return assets;
+  }
+
   function setTheme(overrides) {
     if (overrides && typeof overrides === "object") Object.assign(theme, overrides);
     return theme;
   }
 
+  // SolidPaint.color is {r, g, b} ONLY — an `a` key makes Figma reject the
+  // paint, so an RGBA object is reduced here and its alpha goes to opacity.
   function hex(color) {
-    if (color && typeof color === "object" && "r" in color) return color;
+    if (color && typeof color === "object" && "r" in color) return { r: color.r, g: color.g, b: color.b };
     let value = String(color || "#000000").trim().replace(/^#/, "");
     if (value.length === 3 || value.length === 4) value = [...value].map((c) => c + c).join("");
     if (!/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(value)) value = "000000";
@@ -46,6 +63,7 @@ const J = (() => {
   }
 
   function alphaOf(color) {
+    if (color && typeof color === "object") return typeof color.a === "number" ? color.a : 1;
     const value = String(color || "").trim().replace(/^#/, "");
     if (value.length === 8) return parseInt(value.slice(6, 8), 16) / 255;
     if (value.length === 4) return parseInt(value[3] + value[3], 16) / 255;
@@ -118,6 +136,42 @@ const J = (() => {
 
   const ALIGN = { start: "MIN", center: "CENTER", end: "MAX", between: "SPACE_BETWEEN", baseline: "BASELINE" };
 
+  // Models hand over "120px", "100%", "auto" — even objects — where Figma
+  // wants a number, and Figma then throws deep inside resize() ("Expected
+  // number, received object"). Every numeric option passes through here: a
+  // usable number, or absent so the default applies. "100%" for a width
+  // means what it says, so it becomes fillWidth.
+  const NUMERIC = ["width", "height", "w", "h", "gap", "rowGap", "radius", "strokeWeight",
+    "opacity", "size", "lineHeight", "letterSpacing", "box", "x", "y", "angle"];
+  function num(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+    if (typeof value === "string") {
+      const m = value.trim().match(/^-?\d+(?:\.\d+)?(?=(?:px)?$)/);
+      return m ? parseFloat(m[0]) : undefined;
+    }
+    return undefined;
+  }
+  function clean(opts) {
+    const out = { ...(opts || {}) };
+    if (out.width === "100%" || out.w === "100%") out.fillWidth = true;
+    if (out.height === "100%" || out.h === "100%") out.fillHeight = true;
+    for (const key of NUMERIC) {
+      if (!(key in out) || out[key] === true) continue;
+      if (key === "size" && /^(sm|md|lg)$/.test(String(out[key]))) continue;
+      const value = num(out[key]);
+      if (value === undefined) delete out[key];
+      else out[key] = value;
+    }
+    for (const key of ["width", "height", "w", "h", "box"]) {
+      if (key in out && out[key] < 1) delete out[key];
+    }
+    if ("pad" in out) {
+      out.pad = Array.isArray(out.pad) ? out.pad.map((v) => num(v) ?? 0) : num(out.pad);
+      if (out.pad === undefined) delete out.pad;
+    }
+    return out;
+  }
+
   // Sizing can only be applied once the node sits in an auto-layout parent;
   // setting FILL earlier throws. `attach` appends and then applies it.
   function attach(node, parent, opts = {}) {
@@ -136,29 +190,37 @@ const J = (() => {
   }
 
   function frame(opts = {}) {
-    const node = figma.createFrame();
+    opts = clean(opts);
+    const node = track(figma.createFrame());
     node.name = opts.name || "Frame";
     const dir = opts.dir === undefined ? "VERTICAL" : opts.dir;
+    const wraps = Boolean(opts.wrap) && dir === "HORIZONTAL";
+    // A wrapping row only wraps when something other than its content decides
+    // its width; hugging, it just grows wider. So it fills its parent unless
+    // it was given a width.
+    const fillWidth = opts.fillWidth ?? (wraps && !opts.width ? true : undefined);
     node.fills = opts.fill === undefined || opts.fill === null ? [] : [].concat(opts.fill).map((f) => (typeof f === "string" ? paint(f) : f));
+    // resize() FIRST: on an auto-layout frame it resets both sizing modes to
+    // FIXED, so hugging set before it would silently be lost — the page root
+    // would stay 100 px tall with every section spilling out below it.
+    if (opts.width || opts.height) {
+      node.resize(opts.width || node.width || 100, opts.height || node.height || 100);
+    }
     if (dir !== "NONE") {
       node.layoutMode = dir;
       node.itemSpacing = opts.gap ?? 0;
       padding(node, opts.pad ?? 0);
       node.primaryAxisAlignItems = ALIGN[opts.justify] || "MIN";
-      node.counterAxisAlignItems = ALIGN[opts.align] === "SPACE_BETWEEN" ? "MIN" : ALIGN[opts.align] || "MIN";
-      if (opts.wrap && dir === "HORIZONTAL") {
+      const cross = ALIGN[opts.align] || "MIN";
+      // BASELINE exists only on horizontal frames; SPACE_BETWEEN only on the main axis.
+      node.counterAxisAlignItems =
+        cross === "SPACE_BETWEEN" || (cross === "BASELINE" && dir !== "HORIZONTAL") ? "MIN" : cross;
+      if (wraps) {
         node.layoutWrap = "WRAP";
         node.counterAxisSpacing = opts.rowGap ?? opts.gap ?? 0;
       }
-      node.primaryAxisSizingMode = "AUTO";
-      node.counterAxisSizingMode = "AUTO";
-    }
-    if (opts.width || opts.height) {
-      node.resize(opts.width || node.width || 100, opts.height || node.height || 100);
-      if (dir !== "NONE") {
-        if (opts.width) node.layoutSizingHorizontal = "FIXED";
-        if (opts.height) node.layoutSizingVertical = "FIXED";
-      }
+      node.layoutSizingHorizontal = opts.width ? "FIXED" : "HUG";
+      node.layoutSizingVertical = opts.height ? "FIXED" : "HUG";
     }
     if (opts.radius !== undefined) node.cornerRadius = opts.radius === true ? theme.radius : opts.radius;
     if (opts.stroke) {
@@ -169,11 +231,12 @@ const J = (() => {
     if (opts.shadow) node.effects = [shadow(opts.shadow === true ? 1 : opts.shadow)];
     node.clipsContent = Boolean(opts.clip);
     if (opts.opacity !== undefined) node.opacity = opts.opacity;
-    return attach(node, opts.parent, opts);
+    return attach(node, opts.parent, { ...opts, fillWidth });
   }
 
   async function text(content, opts = {}) {
-    const node = figma.createText();
+    opts = clean(opts);
+    const node = track(figma.createText());
     const family = opts.family || (opts.heading ? theme.headingFont : theme.bodyFont);
     node.fontName = await font(family, opts.weight || (opts.heading ? "Bold" : "Regular"));
     node.characters = String(content ?? "");
@@ -190,8 +253,9 @@ const J = (() => {
     if (opts.upper) node.textCase = "UPPER";
     if (opts.align) node.textAlignHorizontal = { left: "LEFT", center: "CENTER", right: "RIGHT", justify: "JUSTIFIED" }[opts.align] || "LEFT";
     if (opts.width) {
+      // resize() fixes both dimensions; HEIGHT afterwards lets it grow with the text.
+      node.resize(opts.width, Math.max(1, node.height));
       node.textAutoResize = "HEIGHT";
-      node.resize(opts.width, node.height);
     }
     attach(node, opts.parent, opts);
     if (opts.fillWidth) node.textAutoResize = "HEIGHT";
@@ -199,7 +263,8 @@ const J = (() => {
   }
 
   function rect(opts = {}) {
-    const node = figma.createRectangle();
+    opts = clean(opts);
+    const node = track(figma.createRectangle());
     node.name = opts.name || "Rectangle";
     node.resize(opts.w || opts.width || 100, opts.h || opts.height || 100);
     node.fills = [].concat(opts.fill === undefined ? "surface2" : opts.fill).map((f) => (typeof f === "string" ? paint(f) : f));
@@ -208,7 +273,8 @@ const J = (() => {
   }
 
   function ellipse(opts = {}) {
-    const node = figma.createEllipse();
+    opts = clean(opts);
+    const node = track(figma.createEllipse());
     node.name = opts.name || "Ellipse";
     node.resize(opts.w || opts.size || 48, opts.h || opts.size || 48);
     node.fills = [].concat(opts.fill === undefined ? "primary" : opts.fill).map((f) => (typeof f === "string" ? paint(f) : f));
@@ -216,6 +282,7 @@ const J = (() => {
   }
 
   async function button(label, opts = {}) {
+    opts = clean(opts);
     const variant = opts.variant || "primary";
     const styles = {
       primary: { fill: "primary", color: "onPrimary", stroke: null },
@@ -237,6 +304,7 @@ const J = (() => {
   // An image slot. createImageAsync is not available to every runner, so a
   // tasteful gradient with a caption stands in where a photo would go.
   async function image(opts = {}) {
+    opts = clean(opts);
     const node = frame({
       name: opts.name || "Image", dir: "VERTICAL", align: "center", justify: "center",
       width: opts.w || opts.width || 560, height: opts.h || opts.height || 360,
@@ -251,6 +319,7 @@ const J = (() => {
   }
 
   async function icon(glyph, opts = {}) {
+    opts = clean(opts);
     const box = opts.box || 44;
     const node = frame({
       name: opts.name || "Icon", dir: "VERTICAL", align: "center", justify: "center",
@@ -269,6 +338,7 @@ const J = (() => {
 
   // A full-width page section, appended to the page root frame.
   function section(name, opts = {}) {
+    opts = clean(opts);
     return frame({
       name, dir: opts.dir || "VERTICAL", gap: opts.gap ?? 32,
       pad: opts.pad ?? [96, theme.pagePad], align: opts.align || "start",
@@ -367,7 +437,7 @@ const J = (() => {
   }
 
   return {
-    theme, setTheme, hex, paint, gradient, shadow, font, frame, text, rect, ellipse,
+    created, assets, setAssets, theme, setTheme, hex, paint, gradient, shadow, font, frame, text, rect, ellipse,
     button, image, icon, node, section, focus, summary, outline, spec, toHex, attach, padding,
   };
 })();
