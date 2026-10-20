@@ -100,12 +100,6 @@ set "VPYW=%VENV%\Scripts\pythonw.exe"
 set "STAMP=%VENV%\jarvis_requirements.txt"
 call :say "Folder: %ROOT%"
 
-if "%OPT_FIGMA%"=="1" (
-    call :figma_help
-    start "" explorer "%ROOT%\figma_plugin"
-    goto done
-)
-
 rem ---------------------------------------------------------------------------
 rem  2. Update (git checkouts only)
 rem ---------------------------------------------------------------------------
@@ -116,6 +110,14 @@ if "%OPT_UPDATE%"=="1" if exist "%ROOT%\.git" (
         git -C "%ROOT%" pull --ff-only
         if errorlevel 1 call :say "Update skipped - offline, or local changes in the folder."
     )
+)
+
+rem  /figma only shows the plugin setup - but AFTER the update, so the plugin
+rem  files it points to are the current ones.
+if "%OPT_FIGMA%"=="1" (
+    call :figma_help
+    start "" explorer "%ROOT%\figma_plugin"
+    goto done
 )
 
 rem ---------------------------------------------------------------------------

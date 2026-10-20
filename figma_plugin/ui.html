@@ -66,9 +66,19 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  // A request that never answers would stall the loop for good; every fetch
+  // gets a deadline.
+  function withDeadline(ms) {
+    if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) return AbortSignal.timeout(ms);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  }
+
   // text/plain keeps these "simple" requests: no CORS preflight round trip.
   function post(path, payload) {
     return fetch(base + path, {
+      signal: withDeadline(15000),
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
       body: JSON.stringify(payload),
@@ -78,7 +88,7 @@
   async function findBase() {
     for (const candidate of BASES) {
       try {
-        const res = await fetch(candidate + "/status", { cache: "no-store" });
+        const res = await fetch(candidate + "/status", { cache: "no-store", signal: withDeadline(3000) });
         if (res.ok) {
           const info = await res.json();
           if (info && info.name === "jarvis-figma-bridge") return candidate;
@@ -116,7 +126,7 @@
       if (!base) {
         base = await findBase();
         if (!base) {
-          setState("bad", "JARVIS is not running on this computer");
+          setState("bad", "JARVIS not found — start JARVIS (desktop app recommended; in a browser only Chrome works)");
           await sleep(2500);
           continue;
         }
@@ -125,7 +135,8 @@
         parent.postMessage({ pluginMessage: { type: "context-request" } }, "*");
       }
       try {
-        const res = await fetch(`${base}/next?wait=${POLL_WAIT}`, { cache: "no-store" });
+        const res = await fetch(`${base}/next?wait=${POLL_WAIT}`,
+          { cache: "no-store", signal: withDeadline((POLL_WAIT + 10) * 1000) });
         if (res.status === 204) continue;
         if (!res.ok) throw new Error("HTTP " + res.status);
         const job = await res.json();

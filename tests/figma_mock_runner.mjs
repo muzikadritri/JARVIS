@@ -19,6 +19,8 @@ const pluginCode = readFileSync(path.join(here, "..", "figma_plugin", "code.js")
 const FONTS = {
   Inter: ["Light", "Regular", "Medium", "Semi Bold", "Bold", "Extra Bold", "Black"],
   Poppins: ["Regular", "Medium", "SemiBold", "Bold"],
+  "Instrument Serif": ["Regular", "Italic"],
+  "DM Sans": ["Regular", "Medium", "SemiBold", "Bold"],
 };
 const loadedFonts = new Set();
 const images = new Map();
@@ -49,13 +51,33 @@ function checkPaints(paints) {
         const v = p.color && p.color[ch];
         if (typeof v !== "number" || v < 0 || v > 1) throw new Error(`Invalid color channel ${ch}=${v} (expected 0..1)`);
       }
-    } else if (p.type === "GRADIENT_LINEAR") {
+    } else if (["GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(p.type)) {
       if (!Array.isArray(p.gradientStops) || p.gradientStops.length < 2) throw new Error("gradient needs 2+ stops");
       if (!Array.isArray(p.gradientTransform) || p.gradientTransform.length !== 2) throw new Error("bad gradientTransform");
     } else if (p.type === "IMAGE") {
       if (typeof p.imageHash !== "string" || !images.has(p.imageHash)) throw new Error("IMAGE paint with an unknown imageHash");
+      if (!["FILL", "FIT", "CROP", "TILE"].includes(p.scaleMode)) throw new Error(`Invalid scaleMode ${p.scaleMode}`);
+      for (const [k, v] of Object.entries(p.filters || {})) {
+        if (typeof v !== "number" || v < -1 || v > 1) throw new Error(`Invalid image filter ${k}=${v}`);
+      }
     } else {
       throw new Error(`unsupported paint type ${p.type}`);
+    }
+  }
+}
+
+// As in the Figma builds that predate NOISE: an unknown effect type throws.
+const EFFECT_TYPES = ["DROP_SHADOW", "INNER_SHADOW", "LAYER_BLUR", "BACKGROUND_BLUR"];
+function checkEffects(effects) {
+  if (!Array.isArray(effects)) throw new Error("effects must be an array");
+  for (const e of effects) {
+    if (!EFFECT_TYPES.includes(e.type)) throw new Error(`Invalid effect type ${e.type}`);
+    if (typeof e.radius !== "number" || e.radius < 0) throw new Error(`effect radius must be >= 0`);
+    if (typeof e.visible !== "boolean") throw new Error("effect.visible is required");
+    if (e.type.endsWith("SHADOW")) {
+      if (!e.color || typeof e.color.a !== "number") throw new Error("shadow color needs r,g,b,a");
+      if (!e.offset || typeof e.offset.x !== "number") throw new Error("shadow offset is required");
+      if (typeof e.blendMode !== "string") throw new Error("shadow blendMode is required");
     }
   }
 }
@@ -68,14 +90,36 @@ class MockNode {
     this.parent = null;
     this.x = 0; this.y = 0; this.width = 100; this.height = 100;
     this._fills = [];
-    this.strokes = []; this.effects = []; this.opacity = 1;
+    this.strokes = []; this._effects = []; this.opacity = 1;
+    this.constraints = { horizontal: "MIN", vertical: "MIN" };
     this.layoutGrow = 0;
     this._sizingH = "FIXED"; this._sizingV = "FIXED";
-    this.layoutPositioning = "AUTO";
     registry.set(this.id, this);
   }
   get fills() { return this._fills; }
   set fills(v) { checkPaints(v); this._fills = v; }
+  get effects() { return this._effects; }
+  set effects(v) { checkEffects(v); this._effects = v; }
+  get layoutPositioning() { return this._positioning || "AUTO"; }
+  set layoutPositioning(v) {
+    if (v === "ABSOLUTE" && !(this.parent && this.parent.layoutMode && this.parent.layoutMode !== "NONE")) {
+      throw new Error("ABSOLUTE requires an auto-layout parent");
+    }
+    this._positioning = v;
+  }
+  get maxWidth() { return this._maxWidth ?? null; }
+  set maxWidth(v) {
+    const auto = (n) => n && n.layoutMode && n.layoutMode !== "NONE";
+    if (!auto(this) && !auto(this.parent)) throw new Error("maxWidth requires auto layout");
+    this._maxWidth = v;
+  }
+  findAll(fn) {
+    const out = [];
+    const walk = (n) => { for (const c of n.children || []) { if (fn(c)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
+  findAllWithCriteria({ types }) { return this.findAll((n) => types.includes(n.type)); }
   resize(w, h) {
     for (const [prop, v] of [["width", w], ["height", h]]) {
       if (typeof v !== "number") {
@@ -108,6 +152,7 @@ class MockNode {
     if (!["FIXED", "HUG", "FILL"].includes(v)) throw new Error(`invalid sizing ${v}`);
     const parentAuto = this.parent && this.parent.layoutMode && this.parent.layoutMode !== "NONE";
     if (v === "FILL" && !parentAuto) throw new Error("FILL can only be set on children of auto-layout frames");
+    if (v === "FILL" && this.layoutPositioning === "ABSOLUTE") throw new Error("FILL cannot be set on absolute positioned auto-layout children");
     const selfAuto = this.layoutMode && this.layoutMode !== "NONE";
     if (v === "HUG" && !selfAuto && this.type !== "TEXT") throw new Error("HUG can only be set on auto-layout frames and text");
     if (axis === "H") this._sizingH = v; else this._sizingV = v;
@@ -139,7 +184,7 @@ class MockFrame extends MockNode {
     this.children = [];
     this.itemSpacing = 0; this.counterAxisSpacing = 0;
     this.paddingTop = 0; this.paddingRight = 0; this.paddingBottom = 0; this.paddingLeft = 0;
-    this.cornerRadius = 0; this.clipsContent = true; this.strokeWeight = 1;
+    this.cornerRadius = 0; this.clipsContent = true; this.strokeWeight = 1; this.cornerSmoothing = 0;
     this._fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
   }
   appendChild(node) {
@@ -201,6 +246,7 @@ class MockText extends MockNode {
     this._characters = "";
     this.fontSize = 12;
     this.lineHeight = { unit: "AUTO" };
+    this.leadingTrim = "NONE";
     this.letterSpacing = { value: 0, unit: "PERCENT" };
     this._sizingH = "HUG"; this._sizingV = "HUG";
   }
@@ -277,6 +323,23 @@ globalThis.figma = {
     return { hash };
   },
   base64Decode(text) { return new Uint8Array(Buffer.from(String(text), "base64")); },
+  async listAvailableFontsAsync() {
+    return Object.entries(FONTS).flatMap(([family, styles]) => styles.map((style) => ({ fontName: { family, style } })));
+  },
+  createNodeFromSvg(svg) {
+    const text = String(svg);
+    for (const attr of ["viewBox", "width", "height"]) {
+      if (!new RegExp(`<svg[^>]*\\s${attr}=`).test(text)) throw new Error(`SVG needs a ${attr} attribute`);
+    }
+    if (!/<(path|circle|rect|line|polyline|polygon)\b/.test(text)) throw new Error("SVG has no shapes");
+    const f = new MockFrame();
+    f.name = "Svg";
+    page.appendChild(f);
+    const v = new MockNode("VECTOR");
+    f.appendChild(v);
+    return f;
+  },
+  getImageByHash(hash) { return images.has(hash) ? { hash } : null; },
   async setCurrentPageAsync() {},
   viewport: { scrollAndZoomIntoView() {} },
   base64Encode(bytes) { return Buffer.from(bytes).toString("base64"); },
