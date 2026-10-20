@@ -872,6 +872,34 @@ def test_contrast():
           and plan_theme.get("photoFilters") and "primary" not in plan_theme, plan_theme)
 
 
+def test_mcp_job_size():
+    section("figma_designer — jobs fit Figma's own MCP tool")
+    import actions.figma_designer as fd
+    compact = fd._compact_kit()
+    if HAS_NODE:
+        from core import node_runtime
+        ok, err = node_runtime.check_syntax(compact, wrap_async=True)
+        check("the compact kit still parses", ok is True, err)
+    section_code = KIT_SECTION.format(root="1:2", name="Hero", headline="Roasted this morning.") * 4
+    job = fd._job(section_code, {"bg": "#101010"}, None, fd._icons_for(section_code), compact=True)
+    check("kit + theme + icons + a long section stay under 50,000 characters",
+          len(job) < fd.MCP_CODE_LIMIT, len(job))
+
+    class FakeMcp(fd._McpRunner):
+        def __init__(self):
+            self.sent = None
+
+        def run(self, code, description, timeout=0):
+            self.sent = code
+            return {"ok": True}
+    runner = FakeMcp()
+    res = fd._run(runner, "x();" * 20_000, "too big")
+    check("an oversized job is refused locally with a budget the model can act on",
+          not res["ok"] and "budget" in res["error"] and runner.sent is None, res)
+    found = fd._icons_for('const items = [{"title": "Fresh", "icon": "leaf"}];')
+    check("icon names given as data are found", "leaf" in found and "arrow-right" in found, sorted(found))
+
+
 def test_photos():
     section("core/photos — real photos by search, cached, never fatal")
     import io
@@ -1160,7 +1188,7 @@ def test_discovery():
 
 
 def main() -> int:
-    tests = (test_mcp_client, test_manifest, test_bridge, test_contrast, test_photos, test_figma_designer, test_web_builder,
+    tests = (test_mcp_client, test_manifest, test_bridge, test_contrast, test_mcp_job_size, test_photos, test_figma_designer, test_web_builder,
              test_js_studio, test_tools, test_discovery)
     for fn in tests:
         try:

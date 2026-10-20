@@ -76,6 +76,28 @@ const J = (() => {
 
   const mobile = () => theme.width < 600;
 
+  // Which theme surface each frame paints, so text and components placed on
+  // an inverse or primary band pick readable colours by themselves.
+  const surfaceOf = new Map();
+  function tone(parent) {
+    let p = parent;
+    while (p && !surfaceOf.has(p.id)) p = p.parent;
+    return p ? surfaceOf.get(p.id) : "bg";
+  }
+  function onColor(parent, key) {
+    const t = tone(parent);
+    if (t === "inverseBg") {
+      if (key === "text") return "inverseText";
+      if (key === "muted") return paint(theme.inverseText, 0.72);
+      if (key === "border") return paint(theme.inverseText, 0.22);
+    }
+    if (t === "primary") {
+      if (key === "text" || key === "muted" || key === "primary") return "onPrimary";
+      if (key === "border") return paint(theme.onPrimary, 0.3);
+    }
+    return key;
+  }
+
   // ── colour ────────────────────────────────────────────────────────────────
   // SolidPaint.color is {r, g, b} ONLY — an `a` key makes Figma reject the
   // paint, so an RGBA object is reduced here and its alpha goes to opacity.
@@ -111,7 +133,8 @@ const J = (() => {
     return { type: "SOLID", color: hex(resolved), opacity: opacity ?? alphaOf(resolved) };
   }
   const paints = (fill) =>
-    fill === undefined || fill === null ? [] : [].concat(fill).filter(Boolean).map((f) => paint(f));
+    fill === undefined || fill === null ? [] : [].concat(fill)
+      .filter((f) => f && f !== "transparent" && f !== "none").map((f) => paint(f));
 
   // Linear gradient at `angle` degrees (0 = left→right, 90 = top→bottom), or
   // with {css: true} a CSS angle (90deg = left→right). {type: "radial"} makes a
@@ -129,7 +152,7 @@ const J = (() => {
       const [cx, cy] = opts.center || [0.5, 0.5];
       return {
         type: "GRADIENT_RADIAL",
-        gradientTransform: [[sx, 0, cx - 0.5 * sx], [0, sy, cy - 0.5 * sy]],
+        gradientTransform: [[sx, 0, 0.5 - sx * cx], [0, sy, 0.5 - sy * cy]],
         gradientStops: list,
       };
     }
@@ -330,13 +353,22 @@ const J = (() => {
     }
     if (isAuto(parent)) {
       const row = parent.layoutMode === "HORIZONTAL";
-      if (node.type === "TEXT" && (opts.fillWidth || (opts.grow && row))) node.textAutoResize = "HEIGHT";
-      if (opts.fillWidth) {
+      // "grow" in a column that hugs its height means "take the full width";
+      // layoutGrow there would squash the child to its empty size.
+      const growsAcross = opts.grow && !row && parent.primaryAxisSizingMode !== "FIXED";
+      if (node.type === "TEXT" && (opts.fillWidth || growsAcross || (opts.grow && row))) node.textAutoResize = "HEIGHT";
+      if (opts.fillWidth || growsAcross) {
         if (makeRoomX(parent)) node.layoutSizingHorizontal = "FILL";
         else warn(`${node.name}: fillWidth inside a parent that hugs its content`);
       }
-      if (opts.fillHeight) node.layoutSizingVertical = "FILL";
-      if (opts.grow && (!row || makeRoomX(parent))) node.layoutGrow = 1;
+      const verticalRoom = (row ? parent.counterAxisSizingMode : parent.primaryAxisSizingMode) === "FIXED";
+      if (opts.fillHeight && verticalRoom) node.layoutSizingVertical = "FILL";
+      if (opts.grow && row) {
+        if (makeRoomX(parent)) node.layoutSizingHorizontal = "FILL";
+        else warn(`${node.name}: grow inside a row that hugs its width`);
+      } else if (opts.grow && !row && parent.primaryAxisSizingMode === "FIXED") {
+        node.layoutSizingVertical = "FILL";
+      }
       for (const key of ["maxWidth", "minWidth"]) {
         if (opts[key]) {
           try {
@@ -363,10 +395,13 @@ const J = (() => {
     // A wrapping row only wraps when something other than its content decides
     // its width; hugging, it just grows wider. So it fills its parent unless
     // it was given a width.
-    const fillWidth = opts.fillWidth ?? (wraps && !opts.width ? true : undefined);
+    // SPACE_BETWEEN only spreads items when the row has width to share.
+    const spreads = dir === "HORIZONTAL" && opts.justify === "between";
+    const fillWidth = opts.fillWidth ?? ((wraps || spreads) && !opts.width ? true : undefined);
     let fill = opts.fill;
     if (opts.glass && fill === undefined) fill = paint("surface", 0.6);
     node.fills = paints(fill);
+    if (typeof fill === "string" && theme[fill] !== undefined) surfaceOf.set(node.id, fill);
     // resize() FIRST: on an auto-layout frame it resets both sizing modes to
     // FIXED, so hugging set before it would silently be lost.
     if (opts.width || opts.height) {
@@ -472,7 +507,8 @@ const J = (() => {
     if (wraps) node.textAutoResize = "HEIGHT";
     node.characters = String(content ?? "");
     node.fontSize = opts.size || (ramp ? ramp.size[mobile() ? 1 : 0] : 16);
-    const color = opts.color || "text";
+    const color = opts.color ? (["text", "muted"].includes(opts.color) ? onColor(opts.parent, opts.color) : opts.color)
+      : onColor(opts.parent, "text");
     node.fills = [paint(color)];
     node.name = opts.name || node.characters.slice(0, 40) || "Text";
     const lh = parseLineHeight(rawLineHeight ?? (ramp ? ramp.lh : undefined));
@@ -505,6 +541,27 @@ const J = (() => {
       node.resize(w, Math.max(1, node.height));
       node.textAutoResize = "HEIGHT";
       warn(`${node.name}: collapsed text repaired to ${Math.round(w)}px`);
+    }
+    const p = node.parent;
+    if (!wraps && !opts.nowrap && isAuto(p) && p.layoutMode === "VERTICAL"
+        && node.layoutPositioning !== "ABSOLUTE" && node.characters.length > 2) {
+      // A one-line heading wider than its column wraps instead of running out
+      // under the next column or past the clipped section edge.
+      let box = p;
+      while (box && box.layoutSizingHorizontal === "HUG" && isAuto(box.parent)) box = box.parent;
+      const room = box && box.width ? box.width - (box.paddingLeft || 0) - (box.paddingRight || 0) : contentWidth();
+      if (node.width > room + 1) {
+        if (!opts.align) node.textAlignHorizontal = { CENTER: "CENTER", MAX: "RIGHT" }[p.counterAxisAlignItems] || "LEFT";
+        node.textAutoResize = "HEIGHT";
+        if (makeRoomX(p)) {
+          node.layoutSizingHorizontal = "FILL";
+        } else {
+          node.layoutSizingHorizontal = "FIXED";
+          node.resize(Math.max(160, room), Math.max(1, node.height));
+          node.textAutoResize = "HEIGHT";
+        }
+        warn(`${node.name}: long line wrapped to fit`);
+      }
     }
     return node;
   }
@@ -579,10 +636,11 @@ const J = (() => {
     const node = frame({
       name: opts.name || (opts.asset ? `Image/${opts.asset}` : "Image"), dir: "VERTICAL",
       align: "center", justify: "center",
-      width: opts.w || opts.width || (opts.fillWidth ? undefined : 560),
+      width: opts.w || opts.width || (opts.fillWidth || (mobile() && !opts.absolute) ? undefined : 560),
       height: opts.h || opts.height || 360,
       fill: fills, radius: opts.radius ?? theme.radius, smooth: opts.smooth, clip: true,
-      parent: opts.parent, fillWidth: opts.fillWidth, grow: opts.grow, absolute: opts.absolute,
+      parent: opts.parent, grow: opts.grow, absolute: opts.absolute,
+      fillWidth: opts.fillWidth ?? (mobile() && !opts.w && !opts.width && !opts.absolute ? true : undefined),
       x: opts.x, y: opts.y, shadow: opts.shadow,
     });
     if (typeof opts.label === "string" && opts.label) {
@@ -616,7 +674,8 @@ const J = (() => {
       tile.appendChild(vector);
       return tile;
     }
-    if (key && !body) warn(`icon "${key}" is not in the icon set — glyph tile used`);
+    if (key && !body) warn(`icon "${key}" is not in the icon set — glyph used`);
+    if (opts.tile === false || opts.bare) return null;
     const box = opts.box || 44;
     const tile = frame({
       name: opts.name || "Icon", dir: "VERTICAL", align: "center", justify: "center",
@@ -629,7 +688,10 @@ const J = (() => {
 
   async function button(label, opts = {}) {
     opts = clean(opts);
-    const variant = opts.variant || "primary";
+    let variant = opts.variant || "primary";
+    const band = tone(opts.parent);
+    if (band === "primary" && variant === "primary") variant = luminance("primary") > 0.4 ? "dark" : "light";
+    if (band === "inverseBg" && variant === "secondary") variant = "ghost";
     const styles = {
       primary: { fill: "primary", color: "onPrimary", stroke: null },
       secondary: { fill: "surface2", color: "text", stroke: "border" },
@@ -645,8 +707,10 @@ const J = (() => {
       fill: styles.fill, radius: opts.radius ?? 999, stroke: styles.stroke,
       parent: opts.parent, fillWidth: opts.fillWidth,
     });
-    await text(label, { parent: node, role: "button", size: size[2], color: styles.color });
-    if (opts.icon) await icon(opts.icon === true ? "arrow-right" : opts.icon, { parent: node, tile: false, size: 18, color: styles.color });
+    const labelColor = opts.labelColor || (styles.fill ? styles.color : onColor(opts.parent, styles.color));
+    if (!styles.fill && styles.stroke) node.strokes = [paint(onColor(opts.parent, styles.stroke))];
+    await text(label, { parent: node, role: "button", size: size[2], color: labelColor });
+    if (opts.icon) await icon(opts.icon === true ? "arrow-right" : opts.icon, { parent: node, tile: false, size: 18, color: labelColor });
     return node;
   }
 
@@ -656,7 +720,7 @@ const J = (() => {
     const variant = opts.variant || "soft";
     const look = {
       soft: { fill: paint(opts.color || "primary", 0.14), color: opts.color || "primary", stroke: null },
-      outline: { fill: null, color: "text", stroke: "border" },
+      outline: { fill: null, color: onColor(opts.parent, "text"), stroke: onColor(opts.parent, "border") },
       solid: { fill: opts.color || "primary", color: "onPrimary", stroke: null },
       glass: { fill: paint("#FFFFFF", 0.1), color: "text", stroke: "#FFFFFF33" },
     }[variant] || { fill: paint("primary", 0.14), color: "primary", stroke: null };
@@ -695,7 +759,7 @@ const J = (() => {
     opts = clean(opts);
     const node = stack({ name: opts.name || `Stat/${label}`, gap: 8, parent: opts.parent, grow: opts.grow });
     await text(String(value), { parent: node, role: "stat", color: opts.color || "text" });
-    await text(String(label), { parent: node, role: "small", color: "muted" });
+    await text(String(label), { parent: node, role: "small", color: opts.labelColor || "muted" });
     return node;
   }
 
@@ -727,13 +791,16 @@ const J = (() => {
   // A full-width page section, appended to the page root frame.
   function section(name, opts = {}) {
     opts = clean(opts);
-    const vertical = mobile() ? 72 : theme.sectionPad;
-    return frame({
+    const sec = frame({
       name, dir: opts.dir || "VERTICAL", gap: opts.gap ?? (mobile() ? 32 : 48),
-      pad: opts.pad ?? [vertical, theme.pagePad], align: opts.align || "start",
+      pad: opts.pad ?? 0, align: opts.align || "start",
       justify: opts.justify, fill: opts.fill === undefined ? "bg" : opts.fill,
       parent: opts.parent, fillWidth: true, clip: opts.clip ?? true, grain: opts.grain,
     });
+    // The theme's own padding is applied as is — snapping 120 to 128 would put
+    // the content edge off the grid and off contentWidth().
+    if (opts.pad === undefined) padding(sec, [mobile() ? 72 : theme.sectionPad, theme.pagePad]);
+    return sec;
   }
 
   const contentWidth = () => theme.width - 2 * theme.pagePad;
@@ -770,12 +837,13 @@ const J = (() => {
     if (meta.used > meta.cols) warn(`${parentRow.name}: columns add up to ${meta.used} of ${meta.cols}`);
     if (mobile()) {
       return frame({ name: opts.name || `Col/${s}`, dir: opts.dir || "VERTICAL", gap: opts.gap ?? 16,
-        align: opts.align, justify: opts.justify, parent: parentRow, fillWidth: true, ...opts.frame });
+        align: opts.align, justify: opts.justify, pad: opts.pad, fill: opts.fill, radius: opts.radius,
+        parent: parentRow, fillWidth: true, ...opts.frame });
     }
     let inner = parentRow.width - (parentRow.paddingLeft || 0) - (parentRow.paddingRight || 0);
     if (!(inner > 200)) inner = contentWidth();
     const colWidth = (inner - meta.gap * (meta.cols - 1)) / meta.cols;
-    const width = Math.round(colWidth * s + meta.gap * (s - 1));
+    const width = Math.floor(colWidth * s + meta.gap * (s - 1));
     return frame({
       name: opts.name || `Col/${s}`, dir: opts.dir || "VERTICAL", gap: opts.gap ?? 16,
       align: opts.align, justify: opts.justify, pad: opts.pad, fill: opts.fill, radius: opts.radius,
@@ -908,16 +976,25 @@ const J = (() => {
       if (family && !fonts.has(family)) add(t, "wrong-font", family);
     }
     let unnamed = 0;
-    for (const f of all(["FRAME"])) {
+    const frames = all(["FRAME"]);
+    if (target.type === "FRAME") frames.push(target);
+    for (const f of frames) {
       if (/^(Frame|Rectangle|Group)( \d+)?$/.test(f.name)) unnamed += 1;
       if (f.name.startsWith("Image/") && Array.isArray(f.fills) && !f.fills.some((p) => p.type === "IMAGE")) {
         add(f, "image-placeholder", f.name);
       }
       // A frame that hugs grows with its content and cannot overflow; only
       // fixed and filled frames can push content past their edge.
-      if ("children" in f && !f.clipsContent && isAuto(f) && f.layoutSizingHorizontal !== "HUG") {
-        for (const c of f.children) {
-          if (c.layoutPositioning !== "ABSOLUTE" && c.x + c.width > f.width + 1) add(c, "overflow", `wider than ${f.name}`);
+      if (!("children" in f) || !isAuto(f)) continue;
+      const right = f.width - (f.paddingRight || 0) + 1;
+      const bottom = f.height - (f.paddingBottom || 0) + 1;
+      for (const c of f.children) {
+        if (c.layoutPositioning === "ABSOLUTE" || c.visible === false) continue;
+        if (f.layoutSizingHorizontal !== "HUG" && c.x + c.width > right) {
+          add(c, "overflow", `${f.clipsContent ? "cropped by" : "wider than"} ${f.name}`);
+        }
+        if (f.layoutSizingVertical !== "HUG" && c.y + c.height > bottom) {
+          add(c, "overflow-y", `${f.clipsContent ? "cropped by" : "taller than"} ${f.name}`);
         }
       }
     }
