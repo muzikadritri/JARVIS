@@ -728,6 +728,36 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ## ⚡ Quick Start
 
+### 🪟 Windows — one double-click
+
+1. Download **[JARVIS.bat](https://raw.githubusercontent.com/muzikadritri/JARVIS/main/JARVIS.bat)** (right-click → *Save link as…*) into the folder where JARVIS should live — or download the whole project as **[ZIP](https://github.com/muzikadritri/JARVIS/archive/refs/heads/main.zip)** and unpack it.
+2. Double-click `JARVIS.bat`. If Windows SmartScreen asks, choose *More info → Run anyway*.
+3. Paste your free Gemini API key ([aistudio.google.com](https://aistudio.google.com/app/apikey)) when JARVIS asks on its first start.
+
+`JARVIS.bat` does everything else, and running it again is always safe:
+
+| Step | What happens |
+|---|---|
+| Download | Only when the file sits on its own: `git clone`, or the ZIP when git is not installed, into a `JARVIS` folder beside it |
+| Update | `git pull` on every start (git checkouts only) |
+| Python | Finds Python 3.11–3.13 (64-bit); installs 3.12 through `winget` when there is none |
+| Packages | Installs into a private `.venv` — your other Python projects are untouched — and only again when `requirements.txt` changed |
+| Node.js | Offers to install it (optional — the JavaScript and Figma skills check code with it) |
+| Shortcut | A **JARVIS** shortcut on the desktop |
+| Start | Without a console window |
+
+| Option | |
+|---|---|
+| `JARVIS.bat /console` | Start with the log visible — the first thing to try when something is wrong |
+| `JARVIS.bat /reinstall` | Delete `.venv` and install every package again |
+| `JARVIS.bat /install` | Install and update only, do not start |
+| `JARVIS.bat /figma` | Open the Figma plugin folder and show the setup steps |
+| `/noupdate` `/nonode` `/noshortcut` | Skip that step |
+
+The first run downloads several hundred megabytes (Qt, the speech stack, the Playwright browsers) and takes 5–15 minutes; later starts take seconds. What it did is written to `jarvis_setup.log`.
+
+### 🍎 🐧 macOS, Linux — or Windows by hand
+
 ```bash
 git clone https://github.com/muzikadritri/JARVIS.git
 cd JARVIS
@@ -768,6 +798,7 @@ JARVIS/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
 ├── ui.py                     # PyQt6 HUD — avatar canvas, waveform, log panel, settings drawer, camera feed
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
+├── JARVIS.bat                # Windows: download, install, update and start in one double-click
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── providers/                # OPTIONAL — delete it and the assistant runs on Gemini,
 │                             #   exactly as it did before this folder existed.
