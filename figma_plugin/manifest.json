@@ -1,0 +1,24 @@
+{
+  "name": "JARVIS Live Designer",
+  "id": "jarvis-live-designer-schleimy",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "documentAccess": "dynamic-page",
+  "permissions": [
+    "currentuser"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ],
+    "devAllowedDomains": [
+      "http://127.0.0.1:3846",
+      "http://localhost:3846"
+    ],
+    "reasoning": "Talks only to the JARVIS desktop app running on this same computer."
+  }
+}

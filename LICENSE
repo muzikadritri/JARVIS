@@ -1,5 +1,13 @@
-MARK 56 — JARVIS
+JARVIS — Schleimy Edition
+Copyright (c) 2026 Schleimy & Lukas Chiller (modifications and additions)
+
+Based on MARK 56 — JARVIS
 Copyright (c) 2026 FatihMakes
+
+This is an adapted work. Changes by Schleimy & Lukas Chiller: the rebrand, the
+live Figma designer and its plugin (figma_plugin/), the MCP client, JavaScript
+Studio and the website builder, the calculator, network, notes, developer and
+Git tools, the creator identity in the prompt, and the test suite in tests/.
 
 Licensed under the Creative Commons Attribution-NonCommercial 4.0
 International License (CC BY-NC 4.0). Commercial use is not permitted.

@@ -16,9 +16,9 @@ ONE RULE IF YOUR PLUGIN NEEDS TO ASK A MODEL SOMETHING
 
     You get three things that are impossible to add afterwards: a deadline on
     every call, a ladder that steps to another model when one is out of quota or
-    not answering, and — since Mark LVI — whatever provider the user configured
-    in ⚙ → ENGINE & PROVIDERS, so your plugin keeps working on Ollama or another
-    API when Gemini's text quota is gone.
+    not answering, and whatever provider the user configured in ⚙ → ENGINE &
+    PROVIDERS, so your plugin keeps working on Ollama or another API when
+    Gemini's text quota is gone.
 
     A hardcoded client gets none of that and hangs forever when its one model is
     unwell, which is the exact fault the ladder was built to end.

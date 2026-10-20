@@ -11,7 +11,7 @@ THE PROBLEM THIS EXISTS FOR
     together 78% of all module import time on the boot path, for two libraries
     a session that only ever answers questions never touches.
 
-    Mark LV already solved this once, for `plugins/youtube_video.py`, and left
+    An earlier release already solved this once, for `plugins/youtube_video.py`, and left
     a note saying whose bill the rest was: "pyautogui's 271 ms is real, but it
     is the bundled actions' bill, not this plugin's." This module is how
     `actions/` pays it.

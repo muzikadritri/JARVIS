@@ -645,8 +645,8 @@ class PipelineEngine:
     # the outside all three look identical: silence.
     #
     # Printed to the console, never to the activity log — it is diagnostic
-    # output, and the log is something the user reads. Set MARK_NO_TIMING=1 to
-    # silence it.
+    # output, and the log is something the user reads. Set JARVIS_NO_TIMING=1
+    # (or the older MARK_NO_TIMING=1) to silence it.
     def _tick(self, key: str, value, first=None, text: str = "") -> None:
         t = self._timing
         t[key] = t.get(key, 0.0) + float(value or 0.0)
@@ -658,7 +658,7 @@ class PipelineEngine:
     def _print_timing(self) -> None:
         import os
 
-        if os.environ.get("MARK_NO_TIMING"):
+        if os.environ.get("JARVIS_NO_TIMING") or os.environ.get("MARK_NO_TIMING"):
             self._timing = {}
             return
         t, self._timing = self._timing, {}
@@ -995,7 +995,7 @@ def _console(text: str) -> None:
     emoji raised UnicodeEncodeError on a non-UTF-8 console - cp1254 on a Turkish
     Windows, cp1251 on a Russian one, cp932 on a Japanese one - and because the
     print sat outside the tool's own try/except it escaped into the receive loop
-    and took the session down. Mark LV fixed that occurrence.
+    and took the session down. An earlier release fixed that occurrence.
 
     The first version of the timing report brought it straight back, with
     box-drawing characters, and made it worse: this print sits INSIDE
