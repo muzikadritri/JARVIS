@@ -16,6 +16,8 @@ browser — and the difference is what happens AFTER the model answers:
     review   a senior-engineer review laid out on the HUD's review panel
     explain  what a file does, in a few sentences
     site     a complete static website from a brief, validated and served
+    upgrade  an EXISTING site rewritten to agency standard — as a copy, or in
+             place with a backup of every file it replaces
     serve    preview any folder in the browser; `stop` ends previews
 
 Nothing here claims success it did not observe: a file is reported as written
@@ -485,6 +487,62 @@ def _action_site(params: dict, player) -> str:
                            folder=str(web_builder.SITES_DIR))
 
 
+def _upgrade_worker(params: dict, player, root: Path, files: dict, assets: dict) -> None:
+    goal = str(params.get("description") or "").strip()
+    in_place = bool(params.get("in_place"))
+    try:
+        upgraded, problems = web_builder.upgrade_site(
+            files, goal, assets=list(assets), log=lambda m: _log(player, m))
+        if not upgraded:
+            _say(player, "Tell the user in one short sentence in their language that no "
+                         "model produced the upgraded website, so nothing was changed.")
+            return
+        changed = sorted(n for n, c in upgraded.items() if files.get(n) != c)
+        if in_place:
+            backup = web_builder.save_in_place(root, upgraded, files)
+            folder = root
+            where = f"in place; the old versions are in {backup.name}"
+        else:
+            folder = web_builder.save_site(upgraded, f"{root.name}-pro", assets=assets)
+            where = f"as a new copy in {folder}; the original is untouched"
+        _remember(last_site=str(folder))
+        url = web_builder.serve(folder, open_browser=params.get("open", True) is not False)
+        _show(player, "JS — WEBSITE UPGRADE",
+              f"{folder}\n{url}\nChanged: {', '.join(changed) or 'nothing'}"
+              + (("\n\nOpen issues:\n- " + "\n- ".join(problems)) if problems else ""))
+        _log(player, f"upgrade finished: {len(changed)} file(s) changed, saved {where}")
+        _say(player, "Tell the user in one or two short sentences in their language: the "
+                     f"website upgrade is finished — {len(changed)} file(s) rewritten, saved "
+                     f"{where}, and it is open in the browser"
+                     + (f"; {len(problems)} issue(s) remain, the first: {problems[0]}" if problems else "")
+                     + ". Offer nothing else.")
+    except Exception as e:
+        print(f"[JSStudio] upgrade crashed: {type(e).__name__}: {e}")
+        _say(player, "Tell the user in one short sentence in their language that the "
+                     f"website upgrade failed: {e}")
+
+
+def _action_upgrade(params: dict, player) -> str:
+    target = str(params.get("file_path") or _state().get("last_site") or "").strip()
+    if not target:
+        return outcome.ask("js_studio", "Which website should be upgraded — the folder, "
+                           "or its index.html?")
+    try:
+        root, files, assets = web_builder.collect_site(Path(target))
+    except FileNotFoundError as e:
+        return outcome.failed("js_studio", str(e))
+    if not any(n.endswith(".html") for n in files):
+        return outcome.failed("js_studio", f"no HTML page was found in {root}, so it is "
+                              "not a website this can upgrade", folder=str(root))
+    threading.Thread(target=_upgrade_worker, args=(dict(params), player, root, files, assets),
+                     daemon=True, name="js-upgrade").start()
+    _log(player, f"upgrading {len(files)} file(s) from {root} — this takes one to three minutes")
+    return outcome.started("js_studio", upgrading=str(root), files=len(files),
+                           assets=len(assets) or None,
+                           output="in place with a backup" if params.get("in_place")
+                           else str(web_builder.SITES_DIR))
+
+
 def _action_serve(params: dict, player) -> str:
     folder = str(params.get("file_path") or _state().get("last_site") or "").strip()
     if not folder:
@@ -516,7 +574,8 @@ _ACTIONS = {
     "write": _action_write, "check": _action_check, "lint": _action_check,
     "run": _action_run, "test": _action_test, "fix": _action_fix,
     "review": _action_review, "explain": _action_explain, "site": _action_site,
-    "serve": _action_serve, "stop": _action_stop, "status": _action_status,
+    "upgrade": _action_upgrade, "serve": _action_serve, "stop": _action_stop,
+    "status": _action_status,
 }
 
 
@@ -524,7 +583,8 @@ def js_studio(parameters: dict, player=None, **_ignored) -> str:
     params = parameters or {}
     action = str(params.get("action") or "write").strip().lower()
     action = {"website": "site", "build_site": "site", "preview": "serve",
-              "debug": "fix", "create": "write"}.get(action, action)
+              "debug": "fix", "create": "write", "improve": "upgrade",
+              "redesign": "upgrade", "professionalize": "upgrade"}.get(action, action)
     handler = _ACTIONS.get(action)
     if handler is None:
         return outcome.failed("js_studio", f"unknown action '{action}'",
@@ -545,16 +605,19 @@ TOOL = {
         "runs them), 'check' (syntax + standards lint), 'run', 'test', 'fix' "
         "(repair until it parses and runs), 'review' (senior code review on "
         "screen), 'explain', 'site' (build a complete responsive website from a "
-        "brief and open it), 'serve' (preview a folder in the browser), 'stop' "
-        "(end previews), 'status'."
+        "brief and open it), 'upgrade' (take an EXISTING website — an uploaded "
+        "index.html or its folder — and rewrite it to premium agency standard; "
+        "use it whenever the user wants their site improved, redesigned or made "
+        "professional; saves a copy unless in_place), 'serve' (preview a folder "
+        "in the browser), 'stop' (end previews), 'status'."
     ),
-    "brief": "JavaScript: write, check, run, test, fix, review, explain, build websites, serve.",
+    "brief": "JavaScript: write, check, run, test, fix, review, explain, build or upgrade websites, serve.",
     "tier": "extra",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {"type": "STRING",
-                       "description": "write | check | run | test | fix | review | explain | site | serve | stop | status"},
+                       "description": "write | check | run | test | fix | review | explain | site | upgrade | serve | stop | status"},
             "description": {"type": "STRING",
                             "description": "What the code or website should do / the problem to fix"},
             "file_path": {"type": "STRING",
@@ -566,7 +629,9 @@ TOOL = {
             "args": {"type": "STRING", "description": "run/fix: command-line arguments"},
             "timeout": {"type": "INTEGER", "description": "run/test: seconds (default 30 / 120)"},
             "name": {"type": "STRING", "description": "site: folder name"},
-            "open": {"type": "BOOLEAN", "description": "site/serve: open the browser (default true)"},
+            "open": {"type": "BOOLEAN", "description": "site/upgrade/serve: open the browser (default true)"},
+            "in_place": {"type": "BOOLEAN",
+                         "description": "upgrade: overwrite the original files (backup kept) instead of saving a copy"},
         },
         "required": ["action"],
     },

@@ -21,6 +21,7 @@ const FONTS = {
   Poppins: ["Regular", "Medium", "SemiBold", "Bold"],
 };
 const loadedFonts = new Set();
+const images = new Map();
 const registry = new Map();
 let nextId = 2;
 
@@ -42,6 +43,8 @@ function checkPaints(paints) {
   if (!Array.isArray(paints)) throw new Error("fills must be an array");
   for (const p of paints) {
     if (p.type === "SOLID") {
+      const extra = Object.keys(p.color || {}).filter((k) => !["r", "g", "b"].includes(k));
+      if (extra.length) throw new Error(`Invalid SolidPaint color: unexpected key(s) ${extra.join(",")} (RGB only, use opacity)`);
       for (const ch of ["r", "g", "b"]) {
         const v = p.color && p.color[ch];
         if (typeof v !== "number" || v < 0 || v > 1) throw new Error(`Invalid color channel ${ch}=${v} (expected 0..1)`);
@@ -49,6 +52,8 @@ function checkPaints(paints) {
     } else if (p.type === "GRADIENT_LINEAR") {
       if (!Array.isArray(p.gradientStops) || p.gradientStops.length < 2) throw new Error("gradient needs 2+ stops");
       if (!Array.isArray(p.gradientTransform) || p.gradientTransform.length !== 2) throw new Error("bad gradientTransform");
+    } else if (p.type === "IMAGE") {
+      if (typeof p.imageHash !== "string" || !images.has(p.imageHash)) throw new Error("IMAGE paint with an unknown imageHash");
     } else {
       throw new Error(`unsupported paint type ${p.type}`);
     }
@@ -72,8 +77,22 @@ class MockNode {
   get fills() { return this._fills; }
   set fills(v) { checkPaints(v); this._fills = v; }
   resize(w, h) {
+    for (const [prop, v] of [["width", w], ["height", h]]) {
+      if (typeof v !== "number") {
+        throw new Error(`in resize: Property "${prop}" failed validation: Expected number, received ${typeof v}`);
+      }
+    }
     if (!(w >= 0.01 && h >= 0.01)) throw new Error(`resize: invalid size ${w}x${h}`);
     this.width = w; this.height = h;
+    // As in Figma: resize() fixes the size. On an auto-layout frame both
+    // sizing modes become FIXED; on text, auto-resize is switched off.
+    if (this.layoutMode && this.layoutMode !== "NONE") {
+      this._primaryAxisSizingMode = "FIXED";
+      this._counterAxisSizingMode = "FIXED";
+      this._sizingH = "FIXED";
+      this._sizingV = "FIXED";
+    }
+    if (this.type === "TEXT") this._textAutoResize = "NONE";
   }
   remove() {
     if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
@@ -95,7 +114,10 @@ class MockNode {
   }
   async exportAsync(settings) {
     if (!settings || settings.format !== "PNG") throw new Error("mock exports PNG only");
-    return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
+    // Big enough that its base64 is far past any accidental string limit.
+    const bytes = new Uint8Array(6000);
+    bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    return bytes;
   }
 }
 
@@ -136,6 +158,21 @@ const FRAME_DEFAULTS = {
   primaryAxisSizingMode: "FIXED", counterAxisSizingMode: "FIXED", strokeAlign: "INSIDE",
 };
 for (const [prop, initial] of Object.entries(FRAME_DEFAULTS)) enumProp(MockFrame, prop, initial);
+// As in Figma: BASELINE exists only on horizontal auto layout.
+{
+  const base = Object.getOwnPropertyDescriptor(MockFrame.prototype, "counterAxisAlignItems");
+  Object.defineProperty(MockFrame.prototype, "counterAxisAlignItems", {
+    configurable: true,
+    get: base.get,
+    set(v) {
+      if (v === "BASELINE" && this.layoutMode !== "HORIZONTAL") {
+        throw new Error('"BASELINE" can only be set on horizontal auto-layout frames');
+      }
+      base.set.call(this, v);
+    },
+  });
+}
+
 // As in Figma: an AUTO sizing mode on an axis reads back as HUG on that axis.
 for (const [prop, primary] of [["primaryAxisSizingMode", true], ["counterAxisSizingMode", false]]) {
   const base = Object.getOwnPropertyDescriptor(MockFrame.prototype, prop);
@@ -230,6 +267,16 @@ globalThis.figma = {
     loadedFonts.add(`${font.family}::${font.style}`);
   },
   async getNodeByIdAsync(id) { return registry.get(id) || null; },
+  getNodeById() {
+    throw new Error("in getNodeById: Cannot call with documentAccess: dynamic-page. Use figma.getNodeByIdAsync instead.");
+  },
+  createImage(bytes) {
+    if (!(bytes instanceof Uint8Array) || bytes.length < 4) throw new Error("createImage expects image bytes");
+    const hash = `img${images.size + 1}`;
+    images.set(hash, bytes.length);
+    return { hash };
+  },
+  base64Decode(text) { return new Uint8Array(Buffer.from(String(text), "base64")); },
   async setCurrentPageAsync() {},
   viewport: { scrollAndZoomIntoView() {} },
   base64Encode(bytes) { return Buffer.from(bytes).toString("base64"); },

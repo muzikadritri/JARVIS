@@ -163,7 +163,14 @@ class FigmaBridge:
 
     # ── state the action reads ───────────────────────────────────────────────
     def connected(self) -> bool:
-        return self.running and (time.monotonic() - self._last_seen) < _ALIVE_SECONDS
+        """A plugin polled recently — or is busy running a job right now, when
+        it does not poll and must not be mistaken for one that went away."""
+        if not self.running:
+            return False
+        if (time.monotonic() - self._last_seen) < _ALIVE_SECONDS:
+            return True
+        with self._cond:
+            return any(j.taken and not j.done.is_set() for j in self._jobs.values())
 
     def context(self) -> dict:
         with self._cond:
@@ -240,6 +247,8 @@ class FigmaBridge:
             "result": payload.get("result"),
             "error": str(payload.get("error") or ""),
             "logs": list(payload.get("logs") or [])[:200],
+            # Ids a failed job created before it threw — what cleanup removes.
+            "created": [str(i) for i in (payload.get("created") or [])],
             "ms": payload.get("ms"),
         }
         job.done.set()

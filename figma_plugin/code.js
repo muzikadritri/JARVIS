@@ -17,7 +17,7 @@ figma.showUI(__html__, { width: 320, height: 260, themeColors: true, title: "JAR
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function formatValue(value) {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return value.slice(0, 500);
   try {
     return JSON.stringify(serialize(value));
   } catch (err) {
@@ -27,19 +27,27 @@ function formatValue(value) {
 
 // A node handed back raw would serialise as an empty object, or throw on a
 // removed node. The model needs ids and names to refer to what it just made.
-// The depth limit only guards against cycles: J.outline and J.spec return
-// deliberately deep trees, and cutting them at a few levels loses the design.
+//
+// What comes back is DATA for JARVIS and is never cut short: a PNG export is a
+// multi-megabyte base64 string, a page listing can hold thousands of ids, and
+// a truncated one is worse than none. The depth limit only guards cycles.
 const MAX_DEPTH = 40;
+
+// A real node, as opposed to a plain object that merely has `id` and `type`
+// (J.outline and J.summary return exactly those, and must keep every field).
+function isSceneNode(value) {
+  return typeof value.id === "string" && typeof value.type === "string" &&
+    ("removed" in value || typeof value.exportAsync === "function");
+}
 
 function serialize(value, depth = 0) {
   if (value === null || value === undefined) return null;
   if (depth > MAX_DEPTH) return "[…]";
   const kind = typeof value;
-  if (kind === "string") return value.length > 4000 ? value.slice(0, 4000) + "…" : value;
-  if (kind === "number" || kind === "boolean") return value;
+  if (kind === "string" || kind === "number" || kind === "boolean") return value;
   if (kind === "function" || kind === "symbol") return `[${kind}]`;
-  if (Array.isArray(value)) return value.slice(0, 500).map((v) => serialize(v, depth + 1));
-  if (kind === "object" && typeof value.id === "string" && typeof value.type === "string") {
+  if (Array.isArray(value)) return value.map((v) => serialize(v, depth + 1));
+  if (kind === "object" && isSceneNode(value)) {
     const out = { id: value.id, name: value.name, type: value.type };
     if ("width" in value && "height" in value) {
       out.width = Math.round(value.width);
@@ -49,7 +57,7 @@ function serialize(value, depth = 0) {
   }
   if (kind === "object") {
     const out = {};
-    for (const key of Object.keys(value).slice(0, 200)) {
+    for (const key of Object.keys(value)) {
       if (value[key] !== undefined) out[key] = serialize(value[key], depth + 1);
     }
     return out;
@@ -96,13 +104,17 @@ async function execute(job) {
     };
   }
   const started = Date.now();
+  globalThis.__jarvisCreated = [];
   if (job.description) figma.notify(`JARVIS: ${job.description}`.slice(0, 120), { timeout: 2500 });
   try {
     const fn = compile(String(job.code || ""));
     const value = await withTimeout(fn(figma), Number(job.timeoutMs) || 60000);
     return { id: job.id, ok: true, result: serialize(value), logs, ms: Date.now() - started };
   } catch (err) {
-    return { id: job.id, ok: false, error: describeError(err), logs, ms: Date.now() - started };
+    // The ids the job created before it failed, so JARVIS can remove exactly
+    // those — and never anything the user made.
+    const created = Array.isArray(globalThis.__jarvisCreated) ? globalThis.__jarvisCreated.slice() : [];
+    return { id: job.id, ok: false, error: describeError(err), logs, created, ms: Date.now() - started };
   } finally {
     console.log = original.log;
     console.warn = original.warn;

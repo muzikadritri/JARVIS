@@ -153,6 +153,21 @@ class ActionRegistry:
     def names(self) -> set[str]:
         return set(self._actions.keys())
 
+    def attach_ui(self, ui) -> None:
+        """Hand the HUD to actions that report on their own, outside any tool
+        call — the Figma bridge saying a plugin just connected is the case this
+        exists for. An action opts in with a module-level `attach_ui(ui)`; one
+        without it is untouched, and one that raises is logged and skipped."""
+        for rec in self._actions.values():
+            module = sys.modules.get(f"actions.{Path(rec.file).stem}")
+            hook = getattr(module, "attach_ui", None)
+            if not callable(hook):
+                continue
+            try:
+                hook(ui)
+            except Exception as e:
+                self._logger(f"Action '{rec.name}' attach_ui failed: {e}")
+
     # -- called by main.py from _execute_tool --
     def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
         rec = self._actions.get(name)

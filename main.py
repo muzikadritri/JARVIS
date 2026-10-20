@@ -688,6 +688,9 @@ class JarvisLive:
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
+        # Actions that report on their own (the Figma plugin connecting) get
+        # the HUD now that it exists and request_say is wired.
+        self._action_registry.attach_ui(self.ui)
 
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
