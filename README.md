@@ -39,6 +39,13 @@ Everything JARVIS already did carries over untouched: Gemini Live or a local eng
 
 **How it reaches Figma.** Figma's own MCP server comes in two forms: the **desktop** server (`127.0.0.1:3845`) *reads* — screenshots, design context, metadata — and writing to the canvas (`use_figma`) is offered **only by the remote server**, which accepts only the clients in Figma's MCP catalog ([Figma docs](https://developers.figma.com/docs/figma-mcp-server/write-to-canvas)). A desktop assistant of our own is not one of them. So JARVIS ships its own writer: the **JARVIS Live Designer** plugin in `figma_plugin/`, which any Figma user can import, runs inside the open file and talks to JARVIS on loopback. It runs exactly what `use_figma` runs — Plugin API JavaScript — so if a configured MCP server *does* offer `use_figma`, JARVIS uses that instead, with no change anywhere else. Reading goes through the desktop MCP server when it is on.
 
+**What it designs with.** Every design starts from an art direction — a concept, one signature move, a font pairing from Figma's Google fonts, a palette that is checked and corrected for contrast, and final copy for every section. Then:
+
+- **Real photos.** The planner names what each image should show; JARVIS finds openly licensed photos on your machine (Openverse, with Wikimedia Commons as fallback), grades them to one look and places them in the design. Credits are shown on the HUD and kept with the design.
+- **Real icons.** 59 Lucide icons as editable SVG vectors, in the theme colour — no emoji, no text glyphs.
+- **A type scale and a grid.** Roles from `display` to `eyebrow`, a 12-column grid with asymmetric splits, layered soft shadows, glass, ambient glows and smooth corners.
+- **A design review.** When the page is built, JARVIS audits it (collapsed text, wrong fonts, placeholder copy, empty image slots, overflow), looks at a screenshot like a design director, scores it, applies the most important fixes in place — once — and only then exports the final PNG.
+
 **Why it does not break halfway.** One script for a whole page is several hundred lines that fail together. JARVIS writes **one section at a time**: every script is parsed by Node *before* it reaches Figma, runs on top of a design kit (`figma_plugin/kit.js`) that owns the things models reliably get wrong — fonts loaded before text, FILL sizing only inside auto layout, colours in 0–1, font style names that differ per family — and when a section fails anyway, its half-built remains are removed, the exact error goes back to the model, and the page keeps growing.
 
 **Setup — once, two minutes:**
@@ -879,7 +886,8 @@ JARVIS/
 │   ├── manifest.json         # Loopback-only network access, dynamic page loading
 │   ├── code.js               # Runs JARVIS's Plugin API code in the open file, reports the result
 │   ├── ui.html               # Long-polls JARVIS on localhost:3846 — no inbound connections
-│   └── kit.js                # The design kit `J`, prepended to every job
+│   ├── kit.js                # The design kit `J`, prepended to every job
+│   └── icons.json            # Lucide SVG icons (ISC), injected into jobs only as used
 ├── tests/
 │   ├── test_schleimy_skills.py # `python tests/test_schleimy_skills.py` — no network, no key, no Figma
 │   └── figma_mock_runner.mjs # Mock Figma that runs the REAL plugin code against the Plugin API rules
@@ -895,6 +903,7 @@ JARVIS/
 │   ├── figma_bridge.py       # Loopback bridge the Figma plugin polls for work
 │   ├── web_builder.py        # Website generation, validation, repair, saving and preview serving
 │   ├── node_runtime.py       # Finds Node.js; syntax checks and runs JavaScript
+│   ├── photos.py             # Openly licensed photos by search (Openverse, Commons), cached with credits
 │   ├── outcome.py            # What a tool tells the model: done / unverified / failed /
 │   │                         #   ask / started, plus the untrusted-content wrapper
 │   ├── appidentity.py        # Which applications are running, which one the user named,

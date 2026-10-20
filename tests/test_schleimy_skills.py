@@ -441,7 +441,7 @@ def test_bridge():
             try:
                 with urllib.request.urlopen(f"http://[::1]:{port}/status", timeout=5) as r:
                     v6_ok = r.status == 200
-            except Exception as e:
+            except Exception:
                 v6_ok = False
             check("the bridge also answers on IPv6 loopback (localhost may resolve to ::1)", v6_ok)
         else:
@@ -461,19 +461,24 @@ def test_bridge():
 
 KIT_SECTION = """
 const root = await J.node("{root}");
-const sec = J.section("{name}", {{ parent: root, align: "center", gap: 24 }});
-await J.text("{headline}", {{ parent: sec, size: 64, heading: true, align: "center" }});
-await J.text("Small-batch coffee, roasted to order and delivered in 48 hours.", {{ parent: sec, size: 20, color: "muted", fillWidth: true, lineHeight: 1.5 }});
-const row = J.frame({{ parent: sec, dir: "HORIZONTAL", gap: 12, wrap: true }});
-await J.button("Shop beans", {{ parent: row, size: "lg" }});
-await J.button("Our story", {{ parent: row, variant: "ghost" }});
-const grid = J.frame({{ parent: sec, dir: "HORIZONTAL", gap: 24, fillWidth: true }});
-for (const title of ["Fresh", "Fair", "Fast"]) {{
-  const card = J.frame({{ parent: grid, gap: 12, pad: 24, fill: "surface", radius: true, stroke: "border", grow: true }});
-  await J.icon("☕", {{ parent: card }});
-  await J.text(title, {{ parent: card, size: 22, weight: "Semi Bold" }});
+const sec = J.section("{name}", {{ parent: root, fill: "bg" }});
+J.glow({{ parent: sec, color: "primary" }});
+const grid = J.row({{ parent: sec, gap: 48 }});
+const copy = J.col(grid, 7, {{ gap: 24, name: "Copy" }});
+await J.badge("Fresh roast · Berlin", {{ parent: copy, icon: "leaf" }});
+await J.text("{headline}", {{ parent: copy, role: "display", name: "Headline" }});
+await J.text("Small-batch coffee, roasted to order and delivered in 48 hours.", {{ parent: copy, role: "lead", color: "muted" }});
+const actions = J.hstack({{ parent: copy, gap: 12, name: "Actions" }});
+await J.button("Shop beans", {{ parent: actions, size: "lg", icon: true }});
+await J.button("Our story", {{ parent: actions, variant: "ghost" }});
+const media = J.col(grid, 5, {{ name: "Media" }});
+await J.image({{ parent: media, asset: "hero", fillWidth: true, height: 480, overlay: true }});
+const stats = J.row({{ parent: sec, cols: 3, gap: 24, name: "Stats" }});
+for (const [value, label] of [["48h", "roast to door"], ["4.9", "12,400 reviews"], ["14", "origins"]]) {{
+  const card = J.card({{ parent: J.col(stats, 1), variant: "outline", fillWidth: true }});
+  await J.icon("coffee", {{ parent: card }});
+  await J.stat(value, label, {{ parent: card }});
 }}
-await J.image({{ parent: sec, h: 420, fillWidth: true, label: "Roastery" }});
 J.focus(sec);
 return J.summary(sec);
 """
@@ -512,19 +517,48 @@ def test_figma_designer():
         model = FakeModel()
         model.on("planning a website design", json.dumps({
             "title": "Ember Roasters",
+            "concept": "Warm analog dawn light on near-black, editorial and slow.",
+            "signature": "oversized display headline beside a large photo",
+            "voice": "Calm, specific, a little dry.",
             "theme": {"bg": "#120D0A", "surface": "#1E1612", "surface2": "#2A1F19",
                       "text": "#FBF5EF", "muted": "#C9B8A8", "primary": "#E07A3F",
                       "accent": "#F2C14E", "onPrimary": "#120D0A", "border": "#3A2C24",
-                      "radius": 20, "headingFont": "Poppins", "bodyFont": "Comic Sans"},
-            "sections": [{"name": "Hero", "brief": "headline and buttons"},
-                         {"name": "Features", "brief": "three cards"},
-                         {"name": "Footer", "brief": "links"}]}))
+                      "radius": 20, "headingFont": "Poppins", "bodyFont": "Comic Sans",
+                      "headingWeight": "Semi Bold", "photoGrade": "warm"},
+            "images": [{"key": "hero", "query": "coffee roastery dawn", "orientation": "landscape"}],
+            "sections": [{"name": "Hero", "layout": "split 7/5", "background": "bg", "images": ["hero"],
+                          "copy": {"title": "Roasted this morning.", "ctas": ["Shop beans", "Our story"]}},
+                         {"name": "Features", "layout": "stat band", "background": "surface",
+                          "copy": {"title": "Why Ember", "items": [{"title": "Fresh", "icon": "coffee"}]}},
+                         {"name": "Footer", "layout": "columns", "background": "bg"}]}))
         hero_bad = "const root = await J.node(\"x\");\nconst sec = J.section(\"Hero\", { parent: root ;"
         hero_runtime_bad = "const sec = J.section(\"Hero\", { parent: figma.currentPage });\nundefinedHelper();"
-        model.on("section 1 of 3: Hero", hero_bad, hero_runtime_bad, "__HERO__")
-        model.on("section 2 of 3: Features", "__FEATURES__")
-        model.on("section 3 of 3: Footer", "__FOOTER__")
+        model.on("section 1 of 3 (", hero_bad, hero_runtime_bad, "__HERO__")
+        model.on("section 2 of 3 (", "__FEATURES__")
+        model.on("section 3 of 3 (", "__FOOTER__")
+        model.on("design director judging", json.dumps({
+            "score": 6, "fixes": [{"node_id": "?", "section": "Footer", "issue": "cramped", "fix": "more air"}]}))
+        model.on("Apply these design review fixes to the page",
+                 'const r = await J.node("{target}");\nr.children[2].name = "Footer (roomy)";\n'
+                 'J.focus(r);\nreturn J.summary(r);')
         install_model(model)
+
+        from core.photos import Photo
+        import base64
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 400), (190, 110, 60)).save(buf, format="JPEG")
+        jpeg_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        wanted_photos = []
+
+        def fake_fetch(wanted, log=print, budget_seconds=60.0):
+            wanted_photos.extend(wanted)
+            return {"hero": jpeg_b64}, [Photo(query="coffee roastery dawn", width=640, height=400,
+                                              title="Roastery at dawn", creator="Ana", license="CC BY 2.0",
+                                              source="https://example.org/r", attribution="")]
+        real_fetch = fd.photo_source.fetch_assets
+        fd.photo_source.fetch_assets = fake_fetch
 
         real_ask = fd._ask
 
@@ -533,6 +567,8 @@ def test_figma_designer():
             root_id = (fd._load_state().get("last") or {}).get("root_id") or ""
             if "The page root frame exists" in prompt:
                 root_id = prompt.split('J.node("')[1].split('"')[0]
+            if "Target node id: " in prompt:
+                reply = reply.replace("{target}", prompt.split("Target node id: ")[1].split(".")[0])
             for token, name, headline in (("__HERO__", "Hero", "Roasted this morning."),
                                           ("__FEATURES__", "Features", "Why Ember"),
                                           ("__FOOTER__", "Footer", "Ember Roasters")):
@@ -549,26 +585,42 @@ def test_figma_designer():
                          'const f = J.frame({ name: "Robust", width: {}, height: "auto", gap: "24px", '
                          'pad: ["16px", 8], radius: "12" });\n'
                          'const r = J.frame({ name: "Row", dir: "HORIZONTAL", align: "baseline", parent: f });\n'
-                         'const v = J.frame({ name: "Col", align: "baseline", parent: f, width: "100%" });\n'
+                         'const fixed = J.frame({ name: "Fixed", width: 400 });\n'
+                         'const v = J.frame({ name: "Col", align: "baseline", parent: fixed, width: "100%" });\n'
+                         'const hugger = J.frame({ name: "Hugger" });\n'
+                         'const lost = J.frame({ name: "Lost", parent: hugger, fillWidth: true });\n'
                          'f.fills = [J.paint({ r: 1, g: 0.5, b: 0, a: 0.5 })];\n'
                          'const out = { gap: f.itemSpacing, radius: f.cornerRadius, sizing: f.layoutSizingHorizontal, '
-                         'opacity: f.fills[0].opacity, vSizing: v.layoutSizingHorizontal };\n'
-                         'f.remove();\nreturn out;', "kit robustness")
+                         'opacity: f.fills[0].opacity, vSizing: v.layoutSizingHorizontal, '
+                         'lostSizing: lost.layoutSizingHorizontal, warnings: J.warnings.slice() };\n'
+                         'f.remove(); fixed.remove(); hugger.remove();\nreturn out;', "kit robustness")
         check("the kit turns '24px', '12', {} and 'auto' into numbers or defaults instead of throwing",
               robust.get("ok") and robust["result"]["gap"] == 24 and robust["result"]["radius"] == 12
               and robust["result"]["sizing"] == "HUG", robust)
         check("an RGBA colour becomes RGB + opacity, BASELINE on a column falls back, '100%' fills",
               robust.get("ok") and robust["result"]["opacity"] == 0.5 and robust["result"]["vSizing"] == "FILL",
               robust)
+        check("FILL inside a parent that only hugs is refused with a warning instead of collapsing",
+              robust.get("ok") and robust["result"]["lostSizing"] == "HUG"
+              and any("hugs its content" in w for w in robust["result"]["warnings"]), robust)
 
         player = FakePlayer()
         fd._busy.acquire()
         fd._design_worker({"brief": "landing page for a coffee roastery", "style": "warm, dark"},
                           player)
         fd._ask = real_ask
+        fd.photo_source.fetch_assets = real_fetch
         state = fd._load_state().get("last") or {}
         check("the design finished with every section built",
               state.get("sections") == ["Hero", "Features", "Footer"], (state, player.logs[-6:]))
+        check("the planner's photo list is fetched", [w["key"] for w in wanted_photos] == ["hero"], wanted_photos)
+        check("the concept reaches the section prompts",
+              any("Warm analog dawn light" in p and "BUILD NOW" in p for p in model.prompts))
+        check("the automatic review ran and its fix was applied",
+              (state.get("review") or {}).get("score") == 6 and (state.get("review") or {}).get("applied"),
+              state.get("review"))
+        check("photo credits are kept with the design", state.get("photos") and "Ana" in state["photos"][0]["credit"],
+              state.get("photos"))
         check("an unknown font in the plan is dropped, a known one kept",
               state.get("theme", {}).get("headingFont") == "Poppins"
               and "bodyFont" not in state.get("theme", {}), state.get("theme"))
@@ -577,11 +629,11 @@ def test_figma_designer():
         check("a runtime error in Figma is fed back for a fix",
               any("undefinedHelper is not defined" in p for p in model.prompts), "")
         page = sim.dump()
-        roots = [c for c in page["children"] if c["name"] == "Ember Roasters"]
+        roots = [c for c in page["children"] if c["name"] == "Ember Roasters — Desktop 1440"]
         check("the page root frame exists in the file", len(roots) == 1, [c["name"] for c in page["children"]])
         names = [c["name"] for c in roots[0].get("children", [])] if roots else []
-        check("the failed attempt left no half-built section behind",
-              names == ["Hero", "Features", "Footer"], names)
+        check("the failed attempt left no half-built section behind — and the review renamed the footer",
+              names == ["Hero", "Features", "Footer (roomy)"], names)
         stray = [c for c in page["children"] if c["name"] == "Hero"]
         check("nodes a failed attempt built outside the root are removed too", not stray,
               [c["name"] for c in page["children"]])
@@ -592,9 +644,33 @@ def test_figma_designer():
               roots and roots[0]["sizing"] == "FIXED/HUG", roots[0]["sizing"] if roots else None)
         png_size = Path(state.get("png", "")).stat().st_size if state.get("png") else 0
         check("a full-size PNG export survives the trip from Figma intact", png_size == 6000, png_size)
-        hero_text = roots[0]["children"][0]["children"][0] if names else {}
-        check("headings use the planned font (Poppins, alias-mapped style)",
-              hero_text.get("font", {}).get("family") == "Poppins", hero_text.get("font"))
+        def find(node, name):
+            if node.get("name") == name:
+                return node
+            for child in node.get("children", []):
+                hit = find(child, name)
+                if hit:
+                    return hit
+            return {}
+        hero_text = find(roots[0]["children"][0], "Headline") if roots else {}
+        check("headings use the planned font and weight (Poppins SemiBold, resolved from the real list)",
+              hero_text.get("font") == {"family": "Poppins", "style": "SemiBold"}, hero_text.get("font"))
+        check("the display role sets the big size", hero_text.get("size") == 104, hero_text.get("size"))
+        fills = fd._run(fd._BridgeRunner(bridge),
+                        f'const r = await J.node("{roots[0]["id"]}");\n'
+                        'return r.findAllWithCriteria({ types: ["FRAME"] })'
+                        '.filter((n) => n.name.startsWith("Image/hero")).map((n) => n.fills.map((f) => f.type));',
+                        "reading image fills")
+        check("the hero shows the real photo (with its overlay); other sections fall back to light",
+              fills.get("ok") and fills["result"][0] == ["IMAGE", "GRADIENT_LINEAR"]
+              and all(f[0] == "GRADIENT_LINEAR" for f in fills["result"][1:]), fills)
+        icon_nodes = fd._run(fd._BridgeRunner(bridge),
+                             f'const r = await J.node("{roots[0]["id"]}");\n'
+                             'return r.findAll((n) => n.name.startsWith("icon/")).map((n) => n.name);',
+                             "reading icons")
+        check("icons are real SVG vectors, injected only as used",
+              icon_nodes.get("ok") and "icon/coffee" in icon_nodes["result"] and "icon/leaf" in icon_nodes["result"],
+              icon_nodes)
         check("the finished design was exported as PNG", Path(state.get("png", "")).is_file(), state.get("png"))
         check("the user is told the design is finished",
               player.said and "Ember Roasters" in player.said[-1], player.said[-1:])
@@ -610,7 +686,7 @@ def test_figma_designer():
         check("edit applies a change to the selected layer", res.startswith("status=done"), res)
         check("the edit is visible in the file",
               any(c["name"] == "Hero (dark)" for c in
-                  [r for r in sim.dump()["children"] if r["name"] == "Ember Roasters"][0]["children"]))
+                  [r for r in sim.dump()["children"] if r["name"] == "Ember Roasters — Desktop 1440"][0]["children"]))
 
         res = fd.figma_design({"action": "inspect"}, player)
         check("inspect returns the structure as untrusted data",
@@ -638,10 +714,10 @@ def test_figma_designer():
               spec_text[:200])
 
         root_id = roots[0]["id"]
-        model.on("principal product designer reviewing", json.dumps({
-            "score": 7, "fixes": [{"issue": "Footer is cramped", "fix": "Rename Footer to Footer (roomy)"}]}))
+        model.on("design director judging", json.dumps({
+            "score": 7, "fixes": [{"node_id": root_id, "issue": "Footer is cramped", "fix": "rename"}]}))
         model.on("Apply these design review fixes",
-                 'const f = (await J.node("{root}")).children[2];\nf.name = "Footer (roomy)";\n'
+                 'const f = (await J.node("{root}")).children[2];\nf.name = "Footer (polished)";\n'
                  'const t = await J.node("{root}");\nJ.focus(t);\nreturn J.summary(t);')
         real_ask = fd._ask
         fd._ask = lambda prompt, timeout_ms=0: model.text(prompt).replace("{root}", root_id)
@@ -650,8 +726,8 @@ def test_figma_designer():
         check("polish reviews a screenshot and applies the fixes",
               res.startswith("status=done") and "review_score=7" in res, res)
         check("the polish change is visible in the file",
-              any(c["name"] == "Footer (roomy)" for c in
-                  [r for r in sim.dump()["children"] if r["name"] == "Ember Roasters"][0]["children"]))
+              any(c["name"] == "Footer (polished)" for c in
+                  [r for r in sim.dump()["children"] if r["name"] == "Ember Roasters — Desktop 1440"][0]["children"]))
 
         web_builder.SITES_DIR = SANDBOX / "sites"
         model.on("Build a complete, production-quality static website", SITE_GOOD)
@@ -776,6 +852,24 @@ def test_web_builder():
           "Roasted at dawn" in (site / "index.html").read_text()
           and "Roasted this morning." in (backup / "index.html").read_text()
           and not (backup / "styles.css").exists(), backup)
+
+
+def test_contrast():
+    section("figma_designer — palettes are made readable")
+    import actions.figma_designer as fd
+    t = fd._ensure_contrast({"bg": "#FFFFFF", "text": "#BBBBBB", "muted": "#EEEEEE", "primary": "#FFD000",
+                             "onPrimary": "#FFFFFF"})
+    check("text that is too light on white is made dark", fd._contrast(t["text"], t["bg"]) >= 7, t)
+    check("muted text is pulled to at least 4.5:1", fd._contrast(t["muted"], t["bg"]) >= 4.5, t)
+    check("onPrimary becomes the readable one of white or near-black",
+          t["onPrimary"] == "#0B0B0F", t)
+    check("the inverse pair is derived and readable",
+          fd._contrast(t["inverseText"], t["inverseBg"]) >= 7, t)
+    plan_theme = fd._clean_theme({"bg": "#101010", "text": "#FAFAFA", "headingFont": "instrument serif",
+                                  "headingWeight": "semibold", "photoGrade": "warm", "primary": "#zzz"})
+    check("theme cleaning keeps known fonts, normalises the weight, maps the photo grade, drops bad hex",
+          plan_theme.get("headingFont") == "Instrument Serif" and plan_theme.get("headingWeight") == "Semi Bold"
+          and plan_theme.get("photoFilters") and "primary" not in plan_theme, plan_theme)
 
 
 def test_photos():
@@ -1066,7 +1160,7 @@ def test_discovery():
 
 
 def main() -> int:
-    tests = (test_mcp_client, test_manifest, test_bridge, test_photos, test_figma_designer, test_web_builder,
+    tests = (test_mcp_client, test_manifest, test_bridge, test_contrast, test_photos, test_figma_designer, test_web_builder,
              test_js_studio, test_tools, test_discovery)
     for fn in tests:
         try:
