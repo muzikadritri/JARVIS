@@ -778,6 +778,100 @@ def test_web_builder():
           and not (backup / "styles.css").exists(), backup)
 
 
+def test_photos():
+    section("core/photos — real photos by search, cached, never fatal")
+    import io
+    from urllib.parse import parse_qs, urlsplit
+    from core import photos
+    try:
+        from PIL import Image
+    except ImportError:
+        skip("photos", "Pillow is not installed")
+        return
+    buf = io.BytesIO()
+    Image.new("RGB", (2400, 1200), (200, 120, 60)).save(buf, format="JPEG")
+    big_jpeg = buf.getvalue()
+    hits = {"search": 0, "image": 0, "commons": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            return
+
+        def _send(self, body, ctype):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            url = urlsplit(self.path)
+            q = parse_qs(url.query)
+            base = f"http://127.0.0.1:{self.server.server_address[1]}"
+            if url.path == "/v1/images/":
+                hits["search"] += 1
+                term = q.get("q", [""])[0]
+                results = [] if term == "nothing here" else [
+                    {"url": base + "/missing.jpg", "width": 4000, "height": 2000, "title": "broken"},
+                    {"url": base + "/img/roastery.jpg", "thumbnail": base + "/img/roastery.jpg",
+                     "width": 2400, "height": 1200, "title": "Roastery", "creator": "Ana",
+                     "license": "by", "license_version": "2.0",
+                     "foreign_landing_url": "https://example.org/roastery"}]
+                self._send(json.dumps({"results": results}).encode(), "application/json")
+            elif url.path == "/w/api.php":
+                hits["commons"] += 1
+                pages = {"1": {"title": "File:Beans.jpg", "imageinfo": [{
+                    "mime": "image/jpeg", "thumburl": base + "/img/roastery.jpg", "width": 2400,
+                    "height": 1200, "descriptionurl": "https://commons.example/Beans",
+                    "extmetadata": {"Artist": {"value": "Ben"}, "LicenseShortName": {"value": "CC BY-SA 4.0"}}}]}}
+                self._send(json.dumps({"query": {"pages": pages}}).encode(), "application/json")
+            elif url.path == "/img/roastery.jpg":
+                hits["image"] += 1
+                self._send(big_jpeg, "image/jpeg")
+            else:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    photos.OPENVERSE = base + "/v1/images/"
+    photos.COMMONS = base + "/w/api.php"
+    photos.CACHE_DIR = SANDBOX / "photos"
+    try:
+        p = photos.find_photo("coffee roastery", "landscape", log=lambda m: None)
+        check("a photo is found, skipping a broken result", p is not None and p.title == "Roastery", p)
+        check("it is downscaled to at most 1600 px", p and max(p.width, p.height) == 1600, p and (p.width, p.height))
+        check("its licence and creator are kept for the credits", p and p.license == "CC BY 2.0" and p.creator == "Ana")
+        before = dict(hits)
+        again = photos.find_photo("Coffee  Roastery", "landscape", log=lambda m: None)
+        check("the same query is served from the cache", again and hits == before, hits)
+        p2 = photos.find_photo("nothing here", "landscape", log=lambda m: None)
+        check("Wikimedia Commons is the fallback when Openverse finds nothing",
+              p2 is not None and hits["commons"] == 1 and p2.license == "CC BY-SA 4.0", hits)
+        assets, found = photos.fetch_assets([{"key": "hero", "query": "coffee roastery"},
+                                             {"key": "team", "query": "barista portrait", "orientation": "portrait"}],
+                                            log=lambda m: None)
+        check("fetch_assets returns base64 per key", set(assets) == {"hero", "team"}
+              and base64_ok(assets["hero"]), sorted(assets))
+        check("credits list every photo", photos.credits(found).count("•") == 2, photos.credits(found))
+    finally:
+        srv.shutdown()
+    photos.OPENVERSE = f"http://127.0.0.1:{free_port()}/v1/images/"
+    photos.COMMONS = f"http://127.0.0.1:{free_port()}/w/api.php"
+    check("no network means no photo — and no exception",
+          photos.find_photo("mountains at dawn", "landscape", log=lambda m: None) is None)
+
+
+def base64_ok(text: str) -> bool:
+    import base64
+    try:
+        return base64.b64decode(text, validate=True)[:2] == b"\xff\xd8"
+    except Exception:
+        return False
+
+
 def test_js_studio():
     section("actions/js_studio — write, check, run, test, fix, review")
     if not HAS_NODE:
@@ -972,7 +1066,7 @@ def test_discovery():
 
 
 def main() -> int:
-    tests = (test_mcp_client, test_manifest, test_bridge, test_figma_designer, test_web_builder,
+    tests = (test_mcp_client, test_manifest, test_bridge, test_photos, test_figma_designer, test_web_builder,
              test_js_studio, test_tools, test_discovery)
     for fn in tests:
         try:

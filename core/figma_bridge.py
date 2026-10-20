@@ -40,12 +40,14 @@ WHY "localhost" AND TWO SOCKETS
     like http://127.0.0.1:3846 is rejected as "not a valid URL" when the plugin
     is imported — so the plugin can only ever ask for http://localhost:3846.
     `localhost` resolves to ::1 before 127.0.0.1 on Windows and on many Linux
-    setups, so the bridge listens on both loopback addresses rather than
-    relying on the browser to fall back from one to the other.
+    setups. Chromium falls back from one to the other, but the bridge listens
+    on both anyway, so nothing depends on that fallback.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
 import socket
 import threading
 import time
@@ -69,7 +71,22 @@ class BridgeError(Exception):
     pass
 
 
-class _ServerV6(ThreadingHTTPServer):
+class _Server(ThreadingHTTPServer):
+    """One owner per port. HTTPServer turns SO_REUSEADDR on, and on Windows
+    that lets a SECOND process bind the same port — two JARVIS windows would
+    then split the plugin's polls between them and each see half the jobs.
+    Windows gets SO_EXCLUSIVEADDRUSE instead, so the second one is told the
+    port is taken."""
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class _ServerV6(_Server):
     address_family = socket.AF_INET6
 
 
@@ -111,7 +128,7 @@ class FigmaBridge:
             owner = bridge
 
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+            server = _Server(("127.0.0.1", self.port), Handler)
         except OSError as e:
             self._start_error = (f"port {self.port} is already in use or blocked "
                                  f"({e.strerror or e})")
@@ -132,8 +149,14 @@ class FigmaBridge:
             threading.Thread(target=v6.serve_forever, name="figma-bridge-v6",
                              daemon=True).start()
         except OSError as e:
-            print(f"[FigmaBridge] IPv6 loopback unavailable ({e.strerror or e}) — "
-                  f"IPv4 only")
+            if e.errno in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", -1)):
+                # Something else answers on [::1]:port, and a browser trying
+                # ::1 first would reach it instead of JARVIS. Say so plainly.
+                print(f"[FigmaBridge] WARNING: [::1]:{self.port} belongs to another "
+                      f"program — the Figma plugin may connect to it instead")
+            else:
+                print(f"[FigmaBridge] IPv6 loopback unavailable ({e.strerror or e}) — "
+                      f"IPv4 only")
         print(f"[FigmaBridge] listening on http://localhost:{self.port}")
         return True
 
